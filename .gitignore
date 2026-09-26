@@ -1,0 +1,12 @@
+.zig-cache/
+zig-out/
+node_modules/
+
+# build output, local data and credentials
+dist/
+data/*.db
+.env
+.env.*
+credentials
+*.pem
+.DS_Store
