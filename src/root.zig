@@ -47,6 +47,12 @@ pub const Error = err_module.Error;
 /// The diagnostic of the most recent `error.Pjsx` on this thread.
 pub const lastError = err_module.message;
 
+/// Syntax-only parsing, shared with the server template compiler. No DOM lowering.
+pub const syntax = struct {
+    pub const parse = parser_module.parse;
+    pub const parseWithTypeRanges = parser_module.parseWithTypeRanges;
+};
+
 /// Dialect → TSX rewrite of the directive attribute spellings; the first
 /// compile stage and what a type-checker sees.
 pub const canonicalize = canonicalize_module.canonicalize;
@@ -197,4 +203,3 @@ pub const FileResolver = @import("file_resolver.zig").FileResolver;
 
 /// Native SSR and transport for compiled state components.
 pub const compiled = @import("compiled.zig");
-

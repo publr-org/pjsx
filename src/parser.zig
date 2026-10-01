@@ -27,6 +27,17 @@ pub fn parse(allocator: Allocator, source: []const u8, filename: []const u8) Err
     return (try parseWithTypeRanges(allocator, source, filename)).program;
 }
 
+/// Find a template interpolation's closing brace using the TSX grammar, including
+/// regular expressions, comments, nested template literals and JSX children.
+pub fn expressionEnd(allocator: Allocator, source: []const u8, filename: []const u8) Error!u32 {
+    var p = Parser{ .allocator = allocator, .src = source, .lexer = Lexer.init(allocator, source), .filename = filename };
+    try p.advance();
+    try p.expectPunct("{");
+    if (!p.isPunct("}")) _ = try p.parseExpression(false);
+    if (!p.isPunct("}")) return p.unexpected();
+    return p.tok.start;
+}
+
 pub const Parsed = struct {
     program: *Node,
     /// TypeScript-only source ranges `[start, end)` the parser skipped

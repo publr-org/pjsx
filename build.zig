@@ -1,4 +1,5 @@
 const std = @import("std");
+pub const template_syntax = @import("src/syntax.zig");
 const build_library = @import("build/library.zig").build;
 const build_cli = @import("build/cli.zig").build;
 const build_tests = @import("build/tests.zig").build;
