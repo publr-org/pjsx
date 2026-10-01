@@ -258,6 +258,67 @@ pub fn concat(arena: std.mem.Allocator, parts: []const []const u8) []const u8 {
     return out;
 }
 
+// ---- prop wires --------------------------------------------------------------
+//
+// A component called with a wired prop (`publr_bind_<prop>`) re-emits the wire
+// wherever it uses the prop, composed at render time: a value derived from the
+// prop becomes a match over the caller's wire (`($row.nested -> 'small' ~
+// 'default') { 'small': 'gap-2', 'default': 'gap-3' }`), a nested value spec
+// in parentheses where the wire language takes a ref.
+
+/// One arm of `wire_match`: a key as wire text (`'small'`, `true`, `_`) and
+/// its payload spec; a null payload leaves the arm out (no value).
+pub const WireArm = struct { key: []const u8, value: ?[]const u8 };
+
+/// A wire as an operand: a plain `$path` or a quoted literal as is, anything
+/// else parenthesized.
+pub fn wire_group(arena: std.mem.Allocator, wire: []const u8) []const u8 {
+    if (wire.len >= 2 and (wire[0] == '\'' or wire[0] == '"') and wire[wire.len - 1] == wire[0] and
+        std.mem.indexOfScalar(u8, wire[1 .. wire.len - 1], wire[0]) == null) return wire;
+    for (wire) |char| {
+        const plain = std.ascii.isAlphanumeric(char) or char == '$' or char == '_' or char == '.' or char == ':';
+        if (!plain) return concat(arena, &.{ "(", wire, ")" });
+    }
+    return wire;
+}
+
+/// `(disc) { key: payload, … }`, the arms with no payload left out.
+pub fn wire_match(arena: std.mem.Allocator, disc: []const u8, arms: []const WireArm) []const u8 {
+    var out: std.Io.Writer.Allocating = .init(arena);
+    out.writer.print("{s} {{", .{wire_group(arena, disc)}) catch return "";
+    var first = true;
+    for (arms) |arm| {
+        const value = arm.value orelse continue;
+        out.writer.print("{s} {s}: {s}", .{ if (first) "" else ",", arm.key, wire_group(arena, value) }) catch return "";
+        first = false;
+    }
+    out.writer.writeAll(" }") catch return "";
+    return out.written();
+}
+
+/// A prop as a wire operand: its caller's wire when it has one, else its value
+/// as a wire literal.
+pub fn wire_value(arena: std.mem.Allocator, wire: ?[]const u8, value: anytype) []const u8 {
+    if (wire) |present| return wire_group(arena, present);
+    return wire_literal(arena, value);
+}
+
+/// A value as wire text: strings quoted, `null` for an absent optional.
+pub fn wire_literal(arena: std.mem.Allocator, value: anytype) []const u8 {
+    const T = @TypeOf(value);
+    switch (@typeInfo(T)) {
+        .optional => return if (value) |inner| wire_literal(arena, inner) else "null",
+        .bool => return if (value) "true" else "false",
+        .float, .comptime_float => return number_to_string(arena, value) catch "",
+        .@"enum" => return wire_literal(arena, @as([]const u8, @tagName(value))),
+        else => {
+            const text: []const u8 = value;
+            const quote: []const u8 = if (std.mem.indexOfScalar(u8, text, '\'') == null) "'" else "\"";
+            return concat(arena, &.{ quote, text, quote });
+        },
+    }
+}
+
 /// Joins the present, non-empty values with `sep`; null when none is.
 pub fn join_optionals(arena: std.mem.Allocator, values: []const ?[]const u8, sep: []const u8) ?[]const u8 {
     var out: std.Io.Writer.Allocating = .init(arena);

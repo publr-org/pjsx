@@ -1122,8 +1122,14 @@ fn familyBinding(allocator: Allocator, program: *Node, fn_node: *Node, component
         }
 
         if (declaration.type == .FunctionDeclaration and declaration.id != null) {
-            if (exported and !util.eql(declaration.id.?.name, component_name)) {
-                try actions.put(declaration.id.?.name, {});
+            const name = declaration.id.?.name;
+            if (util.eql(name, component_name)) continue;
+            // An exported function is an action; a private one is a helper the
+            // actions call, carried like a private `const`. Components are not.
+            if (exported) {
+                try actions.put(name, {});
+                try module_statements.append(allocator, declaration);
+            } else if (name.len > 0 and !std.ascii.isUpper(name[0])) {
                 try module_statements.append(allocator, declaration);
             }
             continue;
@@ -1300,6 +1306,27 @@ pub fn collectFiniteStringMaps(allocator: Allocator, program: *Node) Error!Finit
         }
     }
     return maps;
+}
+
+/// Module-level `const NAME = "literal"` (or a template literal with no interpolation):
+/// values every target can inline wherever the name is read.
+pub fn collectStringConstants(allocator: Allocator, program: *Node) Error!OrderedMap([]const u8) {
+    var constants = OrderedMap([]const u8).init(allocator);
+    for (program.statements) |statement| {
+        const declaration = (if (statement.type == .ExportNamedDeclaration) statement.declaration else statement) orelse continue;
+        if (declaration.type != .VariableDeclaration or declaration.kind != .@"const") continue;
+        for (declaration.declarations) |item| {
+            const id = item.id.?;
+            if (id.type != .Identifier or item.init == null) continue;
+            const value = unwrap(item.init.?);
+            if (value.type == .Literal and value.value == .string) {
+                try constants.put(id.name, value.value.string);
+            } else if (value.type == .TemplateLiteral and value.expressions.len == 0 and value.quasis.len == 1) {
+                try constants.put(id.name, value.quasis[0].cooked orelse continue);
+            }
+        }
+    }
+    return constants;
 }
 
 pub fn collectClassTokens(allocator: Allocator, parsed: *const ParsedModule) Error![]const []const u8 {
@@ -1499,6 +1526,31 @@ test "family bindings and imported families are analyzed" {
     , "DisclosureButton.ptsx");
     try std.testing.expectEqualStrings("state", part.imported_family.?.state_local.?);
     try std.testing.expectEqualStrings("toggle", part.imported_family.?.action_locals.get("toggle").?);
+}
+
+test "a family carries its private helper functions, never as actions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try parsePjsx(a,
+        \\import { Publr } from "publr/dom";
+        \\export const state = Publr.reactive({ label: "" });
+        \\function describe(count: number): string { return `${count} items`; }
+        \\function Helper() { return <span />; }
+        \\export function relabel(count: number) { state.label = describe(count); }
+        \\export function Counter() { return <div data-part="counter">{state.label}</div>; }
+    , "Counter.ptsx");
+    const family = root.family.?;
+    var carried = util.StringSet.init(a);
+    for (family.module_statements) |statement| {
+        if (statement.type == .FunctionDeclaration) try carried.put(statement.id.?.name, {});
+    }
+    try std.testing.expect(carried.has("describe"));
+    try std.testing.expect(carried.has("relabel"));
+    try std.testing.expect(!carried.has("Helper"));
+    try std.testing.expect(!carried.has("Counter"));
+    try std.testing.expectEqual(@as(usize, 1), family.actions.len);
+    try std.testing.expectEqualStrings("relabel", family.actions[0]);
 }
 
 test "finite string maps are collected from module-level literal objects" {

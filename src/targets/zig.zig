@@ -152,6 +152,8 @@ const Module = struct {
     wire: ?Wire,
     /// Module-level finite string maps (`const SIZES = { xs: "…", … }`).
     finite_maps: []const FiniteMap,
+    /// Module-level string constants (`const HATCH = "…"`), inlined where read.
+    string_constants: []const Type.MapEntry = &.{},
     /// The module's client store registration, assembled into `stores.js`.
     store_registration: ?StoreRegistration,
     /// Whether the module's root can carry the show/text transport: an
@@ -185,7 +187,14 @@ const Lowered = struct {
     type: Type,
 };
 
-const Local = struct { name: []const u8, type: Type, source_name: ?[]const u8 = null };
+const Local = struct {
+    name: []const u8,
+    type: Type,
+    source_name: ?[]const u8 = null,
+    /// A component-body binding's initializer, re-lowered where the binding
+    /// fills a typed target (an enum prop) its string local cannot.
+    binding: ?*const ExpressionIR = null,
+};
 
 const void_elements = [_][]const u8{
     "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr",
@@ -373,6 +382,11 @@ fn adapt_module(arena: std.mem.Allocator, ir: *const compiler.ModuleIR) Error!Mo
         try finite_maps.append(arena, .{ .name = name, .entries = list });
     }
 
+    var string_constants = try arena.alloc(Type.MapEntry, ir.string_constants.len);
+    for (ir.string_constants, 0..) |constant, i| {
+        string_constants[i] = .{ .key = constant.name, .value = constant.value };
+    }
+
     var prop_types: std.Io.Writer.Allocating = .init(arena);
     const props = try adapt_props(arena, component.props, &prop_types.writer, component.name);
 
@@ -400,6 +414,7 @@ fn adapt_module(arena: std.mem.Allocator, ir: *const compiler.ModuleIR) Error!Mo
         .classes = ir.classes,
         .wire = wire,
         .finite_maps = finite_maps.items,
+        .string_constants = string_constants,
         .store_registration = if (component.store_registration) |registration|
             .{ .store = registration.name, .code = registration.code }
         else
@@ -731,6 +746,19 @@ const Generator = struct {
     template_depth: u32 = 0,
     seeded_depth: u32 = 0,
     templates: std.ArrayList(struct { expression: *const ExpressionIR, name: []const u8 }) = .empty,
+    /// The item structs and enums of asserted array literals (`[] as Row[]`),
+    /// declared at file scope once per literal.
+    asserted_types: std.ArrayList(u8) = .empty,
+    asserted_arrays: std.ArrayList(struct { expression: *const ExpressionIR, lowered: Lowered }) = .empty,
+    /// `a && b && <jsx/>` regrouped as `a && (b && <jsx/>)`, once per
+    /// expression, so each guard is its own branch with a stable template id.
+    split_guards: std.ArrayList(struct { expression: *const ExpressionIR, split: *const ExpressionIR }) = .empty,
+    /// The expression whose static fallback is being lowered inside its own
+    /// prop-wire branch, so it is not wired again there.
+    prop_wire_skip: ?*const ExpressionIR = null,
+    /// Names for prop-wire temporaries, counted apart so the plain lowering's
+    /// names do not depend on them.
+    prop_counter: u32 = 0,
     imports_used: std.ArrayList([]const u8),
     indent: u32,
     counter: u32,
@@ -859,7 +887,7 @@ const Generator = struct {
             const name = try gen.fresh("local");
             try gen.line("const {s} = {s};", .{ name, value.code });
             try gen.line("_ = &{s};", .{name});
-            try gen.locals.append(gen.arena, .{ .name = name, .source_name = binding.name, .type = value.type });
+            try gen.locals.append(gen.arena, .{ .name = name, .source_name = binding.name, .type = value.type, .binding = binding.value });
         }
         gen.at_root = true;
         try gen.node(gen.module.root);
@@ -878,6 +906,7 @@ const Generator = struct {
 
         try w.writeAll("\n");
         try w.writeAll(gen.module.prop_types);
+        try w.writeAll(gen.asserted_types.items);
         try w.writeAll("pub const Props = struct {\n");
         try write_fields(w, gen.module.props);
         try w.writeAll(
@@ -937,6 +966,11 @@ const Generator = struct {
         const literal = try zig_string(gen.arena, gen.pending.items);
         gen.pending.clearRetainingCapacity();
         try gen.raw_line("try {s}.writeAll({s});", .{ gen.writer_name, literal });
+    }
+
+    fn fresh_prop(gen: *Generator, comptime prefix: []const u8) Error![]const u8 {
+        gen.prop_counter += 1;
+        return std.fmt.allocPrint(gen.arena, prefix ++ "_w{d}", .{gen.prop_counter});
     }
 
     fn fresh(gen: *Generator, comptime prefix: []const u8) Error![]const u8 {
@@ -1028,6 +1062,10 @@ const Generator = struct {
                     return .{ .lowered = try gen.expression(e) };
                 }
             }
+        }
+        // A template over own state: its parts' initials, formatted.
+        if (e.* == .template and try gen.wire_spec(e) != null) {
+            return if (try gen.template_with(e, true)) |lowered| .{ .lowered = lowered } else .unservable;
         }
         if (e.* == .conditional) {
             if (try gen.own_initial(e.conditional.@"test")) |test_value| {
@@ -1321,8 +1359,18 @@ const Generator = struct {
         // for a foreign binding) until hydration replaces it.
         var skip_children = false;
         var text_ssr: ?Lowered = null;
+        // A sole child derived from wired props: the element carries the text
+        // wire itself (a raw-text element cannot hold a span).
+        var text_prop_wire: ?[]const u8 = null;
+        var sole_child: ?*const ExpressionIR = null;
         if (n.children.len == 1 and n.children[0].* == .expression) {
             const only = n.children[0].expression.value;
+            if (text_wire == null and !contains_jsx(only) and try gen.wire_spec(only) == null) {
+                if (try gen.prop_wire(only, .value)) |wire| {
+                    text_prop_wire = wire;
+                    sole_child = only;
+                }
+            }
             if (try gen.wire_spec(only)) |wired| {
                 if (text_wire != null) return gen.fail("an element carries two `:text` wires", .{});
                 text_wire = wired.spec;
@@ -1348,6 +1396,20 @@ const Generator = struct {
             try retained_classes.append(gen.arena, a);
         }
         class_attrs = retained_classes;
+
+        // Class layers derived from wired props: a group per layer, composed
+        // at render time.
+        var prop_classes: std.ArrayList([]const u8) = .empty;
+        for (class_attrs.items) |a| {
+            if (a.form != .expression) continue;
+            if (try gen.prop_wire(a.value, .classes)) |wire| {
+                try prop_classes.append(gen.arena, wire);
+            } else if (try gen.prop_wire(a.value, .value)) |wire| {
+                // A class list the caller wires (a `classes` prop): the
+                // group is the value spec itself, in parentheses.
+                try prop_classes.append(gen.arena, try std.fmt.allocPrint(gen.arena, "(if ({s}) |publr_classes| @as(?[]const u8, rt.concat(arena, &.{{ \"(\", publr_classes, \")\" }})) else @as(?[]const u8, null))", .{wire}));
+            }
+        }
 
         try gen.static("<");
         switch (tag) {
@@ -1429,6 +1491,11 @@ const Generator = struct {
                         " (if ({s}) |publr_wire| @as(?[]const u8, rt.concat(arena, &.{{ \"{s}:\", publr_wire }})) else @as(?[]const u8, null)),",
                         .{ chain.written(), a.name },
                     );
+                } else if (try gen.prop_wire(a.value, .value)) |wire| {
+                    try transport_parts.writer.print(
+                        " (if ({s}) |publr_wire| @as(?[]const u8, rt.concat(arena, &.{{ \"{s}:\", publr_wire }})) else @as(?[]const u8, null)),",
+                        .{ wire, a.name },
+                    );
                 }
             }
         }
@@ -1505,7 +1572,16 @@ const Generator = struct {
             try gen.static_escaped(wire, true);
             try gen.static("\"");
         }
-        if (behavior_classes.items.len > 0) {
+        if (text_prop_wire) |wire| {
+            try gen.line("try rt.write_attr_cond({s}, \"data-p-text\", {s});", .{ gen.writer_name, wire });
+        }
+        if (prop_classes.items.len > 0) {
+            var groups: std.Io.Writer.Allocating = .init(gen.arena);
+            for (behavior_classes.items) |wire| try groups.writer.print(" {s},", .{try zig_string(gen.arena, wire)});
+            for (prop_classes.items) |wire| try groups.writer.print(" {s},", .{wire});
+            gen.arena_used = true;
+            try gen.line("try rt.write_attr_cond({s}, \"data-p-class\", rt.join_optionals(arena, &.{{{s} }}, \";\"));", .{ gen.writer_name, groups.written() });
+        } else if (behavior_classes.items.len > 0) {
             try gen.static(" data-p-class=\"");
             for (behavior_classes.items, 0..) |wire, index| {
                 if (index > 0) try gen.static(";");
@@ -1536,7 +1612,10 @@ const Generator = struct {
                 try gen.line("try {s}.writeAll({s});", .{ gen.writer_name, html.code });
             }
         } else if (!skip_children) {
+            const saved = gen.prop_wire_skip;
+            if (sole_child != null) gen.prop_wire_skip = sole_child;
             try gen.children(n.children);
+            gen.prop_wire_skip = saved;
         } else if (text_ssr) |initial| {
             // The text wire's SSR value stands in for the skipped child.
             try gen.write_value(initial);
@@ -2033,15 +2112,37 @@ const Generator = struct {
                             return gen.fail("no SSR value for this module's own state on <{s}>", .{name});
                         };
                         switch (state) {
-                            .lowered => |initial| try fields.writer.print(" .{f} = {s},", .{ std.zig.fmtId(attribute_name), if (value.* == .conditional and target.type.unwrapped() == .enumeration) try gen.coerce_enum_expression(value, target.type) else try gen.coerce(initial, target.type) }),
+                            .lowered => |initial| try fields.writer.print(" .{f} = {s},", .{ std.zig.fmtId(attribute_name), (if (target.type.unwrapped() == .enumeration) try gen.enum_expression(value, target.type) else null) orelse try gen.coerce(initial, target.type) }),
                             .unservable => {},
                         }
                     }
-                    if (!wired.own and gen.template_depth > 0 and target.type.unwrapped() == .string) {
-                        try fields.writer.print(" .{f} = \"\",", .{std.zig.fmtId(attribute_name)});
+                    // A template's prototype renders before any row: a prop
+                    // the wire fills takes a placeholder — present, as the
+                    // wired value is (`href === undefined` picks the tag).
+                    if (!wired.own and gen.template_depth > 0) {
+                        const required = target.default == null and !target.type.is_optional();
+                        const placeholder: ?[]const u8 = switch (target.type) {
+                            .string, .opt_string => "\"\"",
+                            .enumeration => |e| if (required) try std.fmt.allocPrint(gen.arena, ".@\"{s}\"", .{e.values[0]}) else null,
+                            .opt_enumeration => |e| try std.fmt.allocPrint(gen.arena, ".@\"{s}\"", .{e.values[0]}),
+                            .number => if (required) "0" else null,
+                            .opt_number => "0",
+                            .boolean => if (required) "false" else null,
+                            .opt_boolean => "false",
+                            else => null,
+                        };
+                        if (placeholder) |code| try fields.writer.print(" .{f} = {s},", .{ std.zig.fmtId(attribute_name), code });
                     }
                     try fields.writer.print(" .publr_bind_{s} = {s},", .{ attribute_name, try zig_string(gen.arena, wired.spec) });
                     continue;
+                }
+            }
+
+            // A value derived from this component's wired props hands its
+            // wire on to the callee.
+            if (form == .expression and target.bind_transport) {
+                if (try gen.prop_wire(value, .value)) |wire| {
+                    try fields.writer.print(" .publr_bind_{s} = {s},", .{ attribute_name, wire });
                 }
             }
 
@@ -2050,8 +2151,8 @@ const Generator = struct {
             else if (form == .literal)
                 try gen.coerce_literal(try gen.literal_text(value), target.type)
             else blk: {
-                if (value.* == .conditional and target.type.unwrapped() == .enumeration) {
-                    break :blk try gen.coerce_enum_expression(value, target.type);
+                if (target.type.unwrapped() == .enumeration) {
+                    if (try gen.enum_expression(value, target.type)) |code| break :blk code;
                 }
                 const lowered = try gen.expression(value);
                 // Each module declares its own array item structs. Copy by field
@@ -2524,17 +2625,68 @@ const Generator = struct {
         return null;
     }
 
-    fn coerce_enum_expression(gen: *Generator, value: *const ExpressionIR, target: Type) Error![]const u8 {
-        if (value.* == .conditional) {
-            const c = value.conditional;
-            return std.fmt.allocPrint(gen.arena, "(if ({s}) {s} else {s})", .{
-                try gen.truthy(if (try gen.own_initial(c.@"test")) |initial| if (initial == .lowered) initial.lowered else try gen.expression(c.@"test") else try gen.expression(c.@"test")),
-                try gen.coerce_enum_expression(c.consequent, target),
-                try gen.coerce_enum_expression(c.alternate, target),
-            });
+    /// A value filling an enum prop, lowered against the target enum rather
+    /// than as a string: a string literal (checked against the enum), a
+    /// conditional of such values, `LOOKUP[key] ?? fallback` over a
+    /// string-keyed finite map (each entry checked, the lookup an optional
+    /// enum), and a component-body binding whose initializer is one of
+    /// these — re-lowered here instead of read as its string local. Null
+    /// when the value is none of these; the caller lowers it as usual.
+    fn enum_expression(gen: *Generator, value: *const ExpressionIR, target: Type) Error!?[]const u8 {
+        const enumeration = target.unwrapped().enumeration;
+        switch (value.*) {
+            .literal => |literal| if (literal == .string) return try gen.coerce_literal(literal.string, target),
+            .conditional => |c| {
+                const test_value = if (try gen.own_initial(c.@"test")) |initial| if (initial == .lowered) initial.lowered else try gen.expression(c.@"test") else try gen.expression(c.@"test");
+                return try std.fmt.allocPrint(gen.arena, "(if ({s}) {s} else {s})", .{
+                    try gen.truthy(test_value),
+                    (try gen.enum_expression(c.consequent, target)) orelse try gen.coerce(try gen.expression(c.consequent), target),
+                    (try gen.enum_expression(c.alternate, target)) orelse try gen.coerce(try gen.expression(c.alternate), target),
+                });
+            },
+            .operation => |operation_ir| if (std.mem.eql(u8, operation_ir.operator, "??")) {
+                if (try gen.string_lookup(operation_ir.left)) |lookup| {
+                    const fallback = (try gen.enum_expression(operation_ir.right, target)) orelse try gen.coerce(try gen.expression(operation_ir.right), target);
+                    return try gen.string_keyed_lookup(lookup.entries, lookup.key_code, enumeration, fallback);
+                }
+            },
+            .member => if (try gen.string_lookup(value)) |lookup| {
+                if (!target.is_optional()) {
+                    return gen.fail("a string-keyed lookup cannot fill the required {s} enum without a `??` fallback", .{enumeration.name});
+                }
+                return try gen.string_keyed_lookup(lookup.entries, lookup.key_code, enumeration, null);
+            },
+            .reference => |reference_ir| if (reference_ir.source == .local) {
+                if (gen.binding_of(reference_ir.name)) |initializer| return gen.enum_expression(initializer, target);
+            },
+            else => {},
         }
-        if (value.* == .literal and value.literal == .string) return gen.coerce_literal(value.literal.string, target);
-        return gen.coerce(try gen.expression(value), target);
+        return null;
+    }
+
+    const StringLookup = struct { entries: []const Type.MapEntry, key_code: []const u8 };
+
+    /// The map and the lowered key of `TONES[kind]` over a finite map with a
+    /// string key; null when the value is not such a lookup.
+    fn string_lookup(gen: *Generator, value: *const ExpressionIR) Error!?StringLookup {
+        if (value.* != .member or value.member.property == .string) return null;
+        const object = try gen.expression(value.member.object);
+        if (object.type != .finite_map) return null;
+        const key = try gen.member_index(value.member.property);
+        if (key.type != .string) return null;
+        return .{ .entries = object.type.finite_map, .key_code = key.code };
+    }
+
+    /// The initializer of the component-body binding a local name resolves
+    /// to, or null when it resolves to anything else.
+    fn binding_of(gen: *Generator, name: []const u8) ?*const ExpressionIR {
+        var index = gen.locals.items.len;
+        while (index > 0) {
+            index -= 1;
+            const local = gen.locals.items[index];
+            if (std.mem.eql(u8, local.source_name orelse local.name, name)) return local.binding;
+        }
+        return null;
     }
 
     fn coerce_literal(gen: *Generator, text: []const u8, target: Type) Error![]const u8 {
@@ -2542,7 +2694,12 @@ const Generator = struct {
             .string, .opt_string, .action => try zig_string(gen.arena, text),
             .node, .opt_node => try std.fmt.allocPrint(gen.arena, "rt.raw({s})", .{try zig_string(gen.arena, text)}),
             .union_value => try std.fmt.allocPrint(gen.arena, ".{{ .string = {s} }}", .{try zig_string(gen.arena, text)}),
-            .enumeration, .opt_enumeration => try std.fmt.allocPrint(gen.arena, ".@\"{s}\"", .{text}),
+            .enumeration, .opt_enumeration => |e| blk: {
+                if (!util.containsString(e.values, text)) {
+                    return gen.fail("\"{s}\" is not a value of the {s} enum", .{ text, e.name });
+                }
+                break :blk try std.fmt.allocPrint(gen.arena, ".@\"{s}\"", .{text});
+            },
             .number, .opt_number => text,
             .boolean, .opt_boolean => text,
             else => gen.fail("a literal cannot fill a prop of type {s}", .{@tagName(target)}),
@@ -2616,6 +2773,22 @@ const Generator = struct {
     // -- expressions in child position: something is written --
 
     fn child_expression(gen: *Generator, e: *const ExpressionIR) Error!void {
+        // Markup guarded by wired props: a `data-p-if` branch per arm when a
+        // prop is wired, the plain branch otherwise.
+        if (gen.prop_wire_skip != e) switch (e.*) {
+            .conditional => |c| if (contains_jsx(c.consequent) or contains_jsx(c.alternate)) {
+                if (try gen.prop_wire(c.@"test", .value)) |wire| {
+                    return gen.prop_branches(e, wire, c.@"test", c.consequent, if (is_null_literal(c.alternate)) null else c.alternate);
+                }
+            },
+            .operation => |operation_ir| if (std.mem.eql(u8, operation_ir.operator, "&&") and contains_jsx(operation_ir.right)) {
+                if (try gen.prop_wire(operation_ir.left, .value)) |wire| {
+                    return gen.prop_branches(e, wire, operation_ir.left, operation_ir.right, null);
+                }
+            },
+            else => {},
+        };
+
         switch (e.*) {
             .literal => |literal| {
                 if (literal != .null and literal != .boolean) {
@@ -2683,6 +2856,9 @@ const Generator = struct {
                         try gen.reactive_branch(operation_ir.right, operation_ir.left, wired, false);
                         return;
                     }
+                    // `a && b && <jsx/>` over state: no one wire tests both,
+                    // so each guard becomes its own branch.
+                    if (try gen.split_guard(e)) |split| return gen.child_expression(split);
                     // `{cond && <jsx/>}` — preserve the selected operand in the portable contract.
                     const left = try gen.expression(operation_ir.left);
                     if (gen.module.semantics_version != 0) {
@@ -2747,7 +2923,124 @@ const Generator = struct {
             try gen.static("</span>");
             return;
         }
+        // Text derived from wired props: a text-wire span when one is wired.
+        if (!contains_jsx(e)) if (try gen.prop_wire(e, .value)) |wire| {
+            const capture = try gen.fresh_prop("publr_text");
+            try gen.line("const {s} = {s};", .{ capture, wire });
+            try gen.line("if ({s} == null) {{", .{capture});
+            gen.indent += 1;
+            try gen.write_child_value(try gen.expression(e));
+            try gen.flush();
+            gen.indent -= 1;
+            try gen.line("}} else {{", .{});
+            gen.indent += 1;
+            try gen.static("<span data-p-text=\"");
+            try gen.line("try rt.escape({s}, {s}.?);", .{ gen.writer_name, capture });
+            try gen.static("\">");
+            try gen.write_child_value(try gen.expression(e));
+            try gen.static("</span>");
+            try gen.flush();
+            gen.indent -= 1;
+            try gen.line("}}", .{});
+            return;
+        };
         try gen.write_child_value(try gen.expression(e));
+    }
+
+    /// `{test && <A/>}` / `{test ? <A/> : <B/>}` whose test reads wired
+    /// props: when the wire is present at render time, each arm is a
+    /// `data-p-if` template (with its server-rendered initial) over it;
+    /// otherwise the plain branch.
+    fn prop_branches(gen: *Generator, e: *const ExpressionIR, wire: []const u8, condition: *const ExpressionIR, consequent: *const ExpressionIR, alternate: ?*const ExpressionIR) Error!void {
+        const capture = try gen.fresh_prop("publr_branch");
+        try gen.line("const {s} = {s};", .{ capture, wire });
+        try gen.line("if ({s} == null) {{", .{capture});
+        gen.indent += 1;
+        const saved = gen.prop_wire_skip;
+        gen.prop_wire_skip = e;
+        try gen.child_expression(e);
+        gen.prop_wire_skip = saved;
+        try gen.flush();
+        gen.indent -= 1;
+        try gen.line("}} else {{", .{});
+        gen.indent += 1;
+        const present = try std.fmt.allocPrint(gen.arena, "{s}.?", .{capture});
+        try gen.prop_branch(consequent, present, condition, false);
+        if (alternate) |arm| try gen.prop_branch(arm, present, condition, true);
+        try gen.flush();
+        gen.indent -= 1;
+        try gen.line("}}", .{});
+    }
+
+    fn prop_branch(gen: *Generator, body: *const ExpressionIR, capture: []const u8, condition: *const ExpressionIR, inverse: bool) Error!void {
+        // A present optional is unwrapped inside the arm, as under a plain
+        // `&&`; the prototype of such an arm renders only when it is present.
+        const tested = try gen.expression(condition);
+        const unwraps = !inverse and tested.type.is_optional() and tested.type != .opt_boolean;
+        const present_count = gen.present_values.items.len;
+        defer gen.present_values.shrinkRetainingCapacity(present_count);
+
+        try gen.static("<template data-p-template=\"");
+        try gen.static(try gen.template_id(body));
+        try gen.static("\" data-p-if=\"");
+        try gen.line("try rt.escape({s}, {s});", .{ gen.writer_name, capture });
+        try gen.static("\"");
+        if (inverse) try gen.static(" data-p-if-not");
+        try gen.static(">");
+        if (unwraps) {
+            try gen.line("if ({s} != null) {{", .{tested.code});
+            gen.indent += 1;
+            try gen.present_values.append(gen.arena, tested.code);
+        }
+        gen.template_depth += 1;
+        try gen.branch_body(body);
+        gen.template_depth -= 1;
+        if (unwraps) {
+            try gen.flush();
+            gen.indent -= 1;
+            try gen.line("}}", .{});
+            gen.present_values.shrinkRetainingCapacity(present_count);
+        }
+        try gen.static("</template>");
+
+        // The server-rendered arm, tested as the plain branch tests it.
+        const presence = unwraps and gen.module.semantics_version == 0;
+        const test_code = if (presence) try std.fmt.allocPrint(gen.arena, "({s} != null)", .{tested.code}) else try gen.truthy(tested);
+        try gen.line("if ({s}{s}) {{", .{ if (inverse) @as([]const u8, "!") else "", test_code });
+        gen.indent += 1;
+        if (unwraps) try gen.present_values.append(gen.arena, tested.code);
+        const marker = try gen.fresh("branch_writer");
+        const outer = gen.writer_name;
+        try gen.line("var {s} = rt.RootAttributeWriter.init({s}, \"data-p-if-row\", null);", .{ marker, outer });
+        gen.writer_name = try std.fmt.allocPrint(gen.arena, "(&{s}.writer)", .{marker});
+        gen.seeded_depth += 1;
+        try gen.branch_body(body);
+        gen.seeded_depth -= 1;
+        try gen.flush();
+        gen.writer_name = outer;
+        gen.indent -= 1;
+        try gen.line("}}", .{});
+    }
+
+    /// `(a && b) && <jsx/>` as `a && (b && <jsx/>)` when `a && b` is not a
+    /// wire but one of its guards is — the same rendering (a falsy guard is
+    /// the value either way), with a branch per guard. One regrouping per
+    /// expression, so the template ids agree between the prototype and the
+    /// server-rendered rows.
+    fn split_guard(gen: *Generator, e: *const ExpressionIR) Error!?*const ExpressionIR {
+        for (gen.split_guards.items) |entry| {
+            if (entry.expression == e) return entry.split;
+        }
+        const guards = e.operation.left;
+        if (guards.* != .operation or !std.mem.eql(u8, guards.operation.operator, "&&")) return null;
+        if (try gen.wire_spec(guards.operation.left) == null and try gen.wire_spec(guards.operation.right) == null) return null;
+
+        const inner = try gen.arena.create(ExpressionIR);
+        inner.* = .{ .operation = .{ .operator = "&&", .left = guards.operation.right, .right = e.operation.right } };
+        const outer = try gen.arena.create(ExpressionIR);
+        outer.* = .{ .operation = .{ .operator = "&&", .left = guards.operation.left, .right = inner } };
+        try gen.split_guards.append(gen.arena, .{ .expression = e, .split = outer });
+        return outer;
     }
 
     /// `xs.map((x) => <…/>)` → `for (xs) |x| { … }`.
@@ -3073,18 +3366,50 @@ const Generator = struct {
         }
 
         switch (e.*) {
-            // The empty-template string coercion (`` `${state.n}` ``).
+            // The empty-template string coercion (`` `${state.n}` ``); a
+            // template with text concatenates (`'More for ' + $row.title`).
             .template => |template_ir| {
                 var inner: ?*const ExpressionIR = null;
+                var plain = true;
                 for (template_ir.parts) |part| {
                     switch (part) {
-                        .string => |text| if (text.len != 0) return null,
+                        .string => |text| if (text.len != 0) {
+                            plain = false;
+                        },
                         .expression => |part_expr| if (inner == null) {
                             inner = part_expr;
-                        } else return null,
+                        } else {
+                            plain = false;
+                        },
                     }
                 }
-                return if (inner) |expr| gen.wire_spec(expr) else null;
+                if (plain) return if (inner) |expr| gen.wire_spec(expr) else null;
+
+                var joined: std.Io.Writer.Allocating = .init(gen.arena);
+                var own = false;
+                var any_wire = false;
+                for (template_ir.parts) |part| {
+                    const operand = switch (part) {
+                        .string => |text| blk: {
+                            if (text.len == 0) continue;
+                            if (std.mem.indexOfScalar(u8, text, '\'') != null) return null;
+                            break :blk try std.fmt.allocPrint(gen.arena, "'{s}'", .{text});
+                        },
+                        .expression => |part_expr| blk: {
+                            if (try gen.wire_spec(part_expr)) |wired| {
+                                any_wire = true;
+                                own = own or wired.own;
+                                break :blk if (std.mem.indexOfAny(u8, wired.spec, " ()") == null) wired.spec else try std.fmt.allocPrint(gen.arena, "({s})", .{wired.spec});
+                            }
+                            const literal = (try gen.wire_literal(part_expr)) orelse return null;
+                            break :blk literal;
+                        },
+                    };
+                    if (joined.written().len > 0) try joined.writer.writeAll(" + ");
+                    try joined.writer.writeAll(operand);
+                }
+                if (!any_wire) return null;
+                return .{ .spec = joined.written(), .own = own };
             },
             .unary => |unary| {
                 if (!std.mem.eql(u8, unary.operator, "!")) return null;
@@ -3188,6 +3513,439 @@ const Generator = struct {
             .spec = try std.fmt.allocPrint(gen.arena, "{s} -> {s}", .{ try gen.invert_wire(test_wire.spec), when_false }),
             .own = test_wire.own,
         };
+    }
+
+    // -- prop wires ---------------------------------------------------------
+    //
+    // A component called inside a list template receives its row-dependent
+    // props as wires (`publr_bind_<prop>`) with placeholder values. Every use
+    // of such a prop re-emits the wire, composed at render time: the value is
+    // evaluated at compile time for each value of the finite props it reads
+    // (booleans, small enums), and the results become a match over each wired
+    // prop's wire (`rt.wire_match`); unbounded props (strings, numbers, large
+    // enums) stay operands (`($row.title)`), compared or concatenated in the
+    // wire. Null when the expression reads no wirable prop, reads anything
+    // else, or needs what the wire language cannot say.
+
+    const PropWireMode = enum {
+        /// A value spec (`data-p-text`, `data-p-bind`, `data-p-if`, a callee's
+        /// `publr_bind_*`).
+        value,
+        /// A `data-p-class` group: the class lists become arms keyed by index,
+        /// so each swap removes the lists of the other arms.
+        classes,
+    };
+
+    const Const = union(enum) { string: []const u8, boolean: bool, number: f64, absent };
+
+    const PropEval = union(enum) {
+        constant: Const,
+        /// Zig code of type `[]const u8`: a wire spec.
+        spec: []const u8,
+    };
+
+    const Assigned = struct { name: []const u8, value: Const };
+
+    /// Enums larger than this are unbounded operands, not matched per value.
+    const prop_domain_max = 24;
+
+    /// The runtime wire (Zig code of type `?[]const u8`, null when no prop it
+    /// reads is wired) of a prop-derived expression; see above.
+    fn prop_wire(gen: *Generator, e: *const ExpressionIR, mode: PropWireMode) Error!?[]const u8 {
+        if (gen.prop_wire_skip) |skip| if (skip == e) return null;
+
+        var names: std.ArrayList([]const u8) = .empty;
+        if (!try gen.prop_dependencies(e, &names, 0)) return null;
+        if (names.items.len == 0) return null;
+
+        var finite: std.ArrayList(Field) = .empty;
+        for (names.items) |name| {
+            const field = find_field(gen.module.props, name).?;
+            if (try gen.prop_domain(field) != null) try finite.append(gen.arena, field);
+        }
+
+        var classes: std.ArrayList([]const u8) = .empty;
+        var assignment: std.ArrayList(Assigned) = .empty;
+        const tree = (try gen.prop_tree(e, finite.items, &assignment, if (mode == .classes) &classes else null)) orelse return null;
+
+        var any: std.Io.Writer.Allocating = .init(gen.arena);
+        for (names.items, 0..) |name, index| {
+            try any.writer.print("{s}props.publr_bind_{s} != null", .{ if (index == 0) "" else " or ", name });
+        }
+        gen.props_used = true;
+        gen.arena_used = true;
+
+        if (mode == .value) {
+            return try std.fmt.allocPrint(gen.arena, "(if ({s}) {s} else @as(?[]const u8, null))", .{ any.written(), tree });
+        }
+
+        var arms: std.Io.Writer.Allocating = .init(gen.arena);
+        try arms.writer.writeAll(" {");
+        for (classes.items, 0..) |class, index| {
+            try arms.writer.print("{s} '{d}': {s}", .{ if (index == 0) "" else ",", index, class });
+        }
+        try arms.writer.writeAll(" }");
+        const capture = try gen.fresh_prop("publr_classes");
+        return try std.fmt.allocPrint(
+            gen.arena,
+            "(if ({s}) (if ({s}) |{s}| @as(?[]const u8, rt.concat(arena, &.{{ rt.wire_group(arena, {s}), {s} }})) else @as(?[]const u8, null)) else @as(?[]const u8, null))",
+            .{ any.written(), tree, capture, capture, try zig_string(gen.arena, arms.written()) },
+        );
+    }
+
+    /// The finite values a prop takes — booleans, enums up to
+    /// `prop_domain_max`, and `absent` for optionals; null when unbounded.
+    fn prop_domain(gen: *Generator, field: Field) Error!?[]const Const {
+        var values: std.ArrayList(Const) = .empty;
+        switch (field.type.unwrapped()) {
+            .boolean => {
+                try values.append(gen.arena, .{ .boolean = true });
+                try values.append(gen.arena, .{ .boolean = false });
+            },
+            .enumeration => |e| {
+                if (e.values.len > prop_domain_max) return null;
+                for (e.values) |tag| try values.append(gen.arena, .{ .string = tag });
+            },
+            else => return null,
+        }
+        if (field.type.is_optional()) try values.append(gen.arena, .absent);
+        return values.items;
+    }
+
+    /// Collects the wirable props `e` reads, through the component's own
+    /// bindings and finite maps; false when it reads anything else.
+    fn prop_dependencies(gen: *Generator, e: *const ExpressionIR, names: *std.ArrayList([]const u8), depth: u32) Error!bool {
+        if (depth > 16) return false;
+        switch (e.*) {
+            .literal, .absent => return true,
+            .reference => |reference_ir| switch (reference_ir.source) {
+                .prop => {
+                    const field = find_field(gen.module.props, reference_ir.name) orelse return false;
+                    if (!field.bind_transport) return false;
+                    if (!util.containsString(names.items, reference_ir.name)) try names.append(gen.arena, reference_ir.name);
+                    return true;
+                },
+                .local => {
+                    if (gen.binding_of(reference_ir.name)) |initializer| return gen.prop_dependencies(initializer, names, depth + 1);
+                    return gen.finite_map_named(reference_ir.name) != null;
+                },
+                else => return false,
+            },
+            .member => |member| switch (member.property) {
+                .string => return false,
+                .number => return gen.prop_dependencies(member.object, names, depth + 1),
+                .expression => |key| return try gen.prop_dependencies(member.object, names, depth + 1) and
+                    try gen.prop_dependencies(key, names, depth + 1),
+            },
+            .unary => |unary| return gen.prop_dependencies(unary.argument, names, depth + 1),
+            .operation => |operation_ir| return try gen.prop_dependencies(operation_ir.left, names, depth + 1) and
+                try gen.prop_dependencies(operation_ir.right, names, depth + 1),
+            .conditional => |c| return try gen.prop_dependencies(c.@"test", names, depth + 1) and
+                try gen.prop_dependencies(c.consequent, names, depth + 1) and
+                try gen.prop_dependencies(c.alternate, names, depth + 1),
+            .template => |template_ir| {
+                for (template_ir.parts) |part| switch (part) {
+                    .string => {},
+                    .expression => |part_expr| if (!try gen.prop_dependencies(part_expr, names, depth + 1)) return false,
+                };
+                return true;
+            },
+            else => return false,
+        }
+    }
+
+    /// The module's finite map of that name, unless a local shadows it.
+    fn finite_map_named(gen: *Generator, name: []const u8) ?[]const Type.MapEntry {
+        for (gen.locals.items) |local| {
+            if (std.mem.eql(u8, local.source_name orelse local.name, name)) return null;
+        }
+        for (gen.module.finite_maps) |map| {
+            if (std.mem.eql(u8, map.name, name)) return map.entries;
+        }
+        return null;
+    }
+
+    /// The decision tree over the finite props (Zig code of type
+    /// `?[]const u8`): per prop, a match over its wire when wired, a switch
+    /// on its value otherwise; at the leaves, the expression's value under
+    /// the assignment as wire text (a class list's index in `classes` mode).
+    fn prop_tree(gen: *Generator, e: *const ExpressionIR, finite: []const Field, assignment: *std.ArrayList(Assigned), classes: ?*std.ArrayList([]const u8)) Error!?[]const u8 {
+        if (assignment.items.len == finite.len) {
+            const result = (try gen.prop_eval(e, assignment.items, 0)) orelse return null;
+            switch (result) {
+                .constant => |value| {
+                    if (classes) |list| {
+                        const class = switch (value) {
+                            .string => |text| std.mem.trim(u8, text, " "),
+                            .absent => "",
+                            else => return null,
+                        };
+                        const index = for (list.items, 0..) |known, index| {
+                            if (std.mem.eql(u8, known, class)) break index;
+                        } else blk: {
+                            try list.append(gen.arena, class);
+                            break :blk list.items.len - 1;
+                        };
+                        return try std.fmt.allocPrint(gen.arena, "@as(?[]const u8, \"'{d}'\")", .{index});
+                    }
+                    if (value == .absent) return "@as(?[]const u8, null)";
+                    return try std.fmt.allocPrint(gen.arena, "@as(?[]const u8, {s})", .{try zig_string(gen.arena, (try gen.const_wire_text(value)) orelse return null)});
+                },
+                .spec => |code| {
+                    if (classes != null) return null;
+                    return try std.fmt.allocPrint(gen.arena, "@as(?[]const u8, {s})", .{code});
+                },
+            }
+        }
+
+        const field = finite[assignment.items.len];
+        const domain = (try gen.prop_domain(field)).?;
+        var subs = try gen.arena.alloc([]const u8, domain.len);
+        for (domain, 0..) |value, index| {
+            try assignment.append(gen.arena, .{ .name = field.name, .value = value });
+            defer _ = assignment.pop();
+            subs[index] = (try gen.prop_tree(e, finite, assignment, classes)) orelse return null;
+        }
+
+        // A tree that maps each value to itself is the wire itself.
+        const identity = classes == null and !field.type.is_optional() and for (domain, subs) |value, sub| {
+            const text = (try gen.const_wire_text(value)) orelse break false;
+            const own = try std.fmt.allocPrint(gen.arena, "@as(?[]const u8, {s})", .{try zig_string(gen.arena, text)});
+            if (!std.mem.eql(u8, own, sub)) break false;
+        } else true;
+
+        var arms: std.Io.Writer.Allocating = .init(gen.arena);
+        for (domain, subs) |value, sub| {
+            const key: []const u8 = switch (value) {
+                .boolean => |b| if (b) "true" else "false",
+                .string => |tag| (try gen.const_wire_text(value)) orelse return gen.fail("enum value {s} cannot be a wire key", .{tag}),
+                .absent => "_",
+                .number => unreachable,
+            };
+            try arms.writer.print(" .{{ .key = {s}, .value = {s} }},", .{ try zig_string(gen.arena, key), sub });
+        }
+
+        const value_code = try std.fmt.allocPrint(gen.arena, "props.{f}", .{std.zig.fmtId(field.name)});
+        const unwrapped = if (field.type.is_optional()) try gen.fresh_prop("publr_value") else value_code;
+        const switched = switch (field.type.unwrapped()) {
+            .boolean => try std.fmt.allocPrint(gen.arena, "(if ({s}) {s} else {s})", .{ unwrapped, subs[0], subs[1] }),
+            .enumeration => |enumeration| blk: {
+                var cases: std.Io.Writer.Allocating = .init(gen.arena);
+                for (enumeration.values, 0..) |tag, index| {
+                    try cases.writer.print(" .@\"{s}\" => {s},", .{ tag, subs[index] });
+                }
+                break :blk try std.fmt.allocPrint(gen.arena, "(switch ({s}) {{{s} }})", .{ unwrapped, cases.written() });
+            },
+            else => unreachable,
+        };
+        const selected = if (field.type.is_optional())
+            try std.fmt.allocPrint(gen.arena, "(if ({s}) |{s}| {s} else {s})", .{ value_code, unwrapped, switched, subs[subs.len - 1] })
+        else
+            switched;
+
+        const capture = try gen.fresh_prop("publr_wire");
+        if (identity) {
+            return try std.fmt.allocPrint(gen.arena, "(if (props.publr_bind_{s}) |{s}| @as(?[]const u8, {s}) else {s})", .{ field.name, capture, capture, selected });
+        }
+        return try std.fmt.allocPrint(gen.arena, "(if (props.publr_bind_{s}) |{s}| @as(?[]const u8, rt.wire_match(arena, {s}, &.{{{s} }})) else {s})", .{
+            field.name,
+            capture,
+            capture,
+            arms.written(),
+            selected,
+        });
+    }
+
+    /// A compile-time value as wire text: strings quoted (with whichever
+    /// quote they do not contain), `null` when absent.
+    fn const_wire_text(gen: *Generator, value: Const) Error!?[]const u8 {
+        return switch (value) {
+            .string => |text| blk: {
+                const quote: u8 = if (std.mem.indexOfScalar(u8, text, '\'') == null) '\'' else if (std.mem.indexOfScalar(u8, text, '"') == null) '"' else break :blk null;
+                break :blk try std.fmt.allocPrint(gen.arena, "{c}{s}{c}", .{ quote, text, quote });
+            },
+            .boolean => |b| if (b) "true" else "false",
+            .number => |n| try util.numberToString(gen.arena, n),
+            .absent => "null",
+        };
+    }
+
+    fn const_truthy(value: Const) bool {
+        return switch (value) {
+            .string => |text| text.len != 0,
+            .boolean => |b| b,
+            .number => |n| n != 0 and !std.math.isNan(n),
+            .absent => false,
+        };
+    }
+
+    fn const_equal(left: Const, right: Const) bool {
+        return switch (left) {
+            .string => |a| right == .string and std.mem.eql(u8, a, right.string),
+            .boolean => |a| right == .boolean and a == right.boolean,
+            .number => |a| right == .number and a == right.number,
+            .absent => right == .absent,
+        };
+    }
+
+    /// A wire operand for a result: a spec grouped, a constant as its text.
+    fn prop_operand(gen: *Generator, value: PropEval) Error!?[]const u8 {
+        return switch (value) {
+            .spec => |code| try std.fmt.allocPrint(gen.arena, "rt.wire_group(arena, {s})", .{code}),
+            .constant => |c| if (try gen.const_wire_text(c)) |text| try zig_string(gen.arena, text) else null,
+        };
+    }
+
+    /// `e` under an assignment of its finite props: a constant, or a spec
+    /// over its unbounded props; null when the wire language cannot say it.
+    fn prop_eval(gen: *Generator, e: *const ExpressionIR, assignment: []const Assigned, depth: u32) Error!?PropEval {
+        if (depth > 16) return null;
+        switch (e.*) {
+            .literal => |literal| return .{ .constant = switch (literal) {
+                .string => |text| .{ .string = text },
+                .number => |n| .{ .number = n },
+                .boolean => |b| .{ .boolean = b },
+                .null => .absent,
+            } },
+            .absent => return .{ .constant = .absent },
+            .reference => |reference_ir| switch (reference_ir.source) {
+                .prop => {
+                    for (assignment) |assigned| {
+                        if (std.mem.eql(u8, assigned.name, reference_ir.name)) return .{ .constant = assigned.value };
+                    }
+                    return .{ .spec = try std.fmt.allocPrint(gen.arena, "rt.wire_value(arena, props.publr_bind_{s}, props.{f})", .{ reference_ir.name, std.zig.fmtId(reference_ir.name) }) };
+                },
+                .local => {
+                    const initializer = gen.binding_of(reference_ir.name) orelse return null;
+                    return gen.prop_eval(initializer, assignment, depth + 1);
+                },
+                else => return null,
+            },
+            .member => |member| {
+                if (member.object.* != .reference) return null;
+                const entries = gen.finite_map_named(member.object.reference.name) orelse return null;
+                const key: Const = switch (member.property) {
+                    .string => return null,
+                    .number => |n| .{ .number = n },
+                    .expression => |key_expr| switch ((try gen.prop_eval(key_expr, assignment, depth + 1)) orelse return null) {
+                        .constant => |c| c,
+                        .spec => return null,
+                    },
+                };
+                if (key != .string) return .{ .constant = .absent };
+                return .{ .constant = if (finite_value(entries, key.string)) |value| .{ .string = value } else .absent };
+            },
+            .unary => |unary| {
+                const argument = (try gen.prop_eval(unary.argument, assignment, depth + 1)) orelse return null;
+                if (std.mem.eql(u8, unary.operator, "!")) return switch (argument) {
+                    .constant => |c| .{ .constant = .{ .boolean = !const_truthy(c) } },
+                    .spec => |code| .{ .spec = try std.fmt.allocPrint(gen.arena, "rt.concat(arena, &.{{ \"not \", rt.wire_group(arena, {s}) }})", .{code}) },
+                };
+                if (std.mem.eql(u8, unary.operator, "-") and argument == .constant and argument.constant == .number) {
+                    return .{ .constant = .{ .number = -argument.constant.number } };
+                }
+                return null;
+            },
+            .operation => |operation_ir| {
+                const operator = operation_ir.operator;
+                const left = (try gen.prop_eval(operation_ir.left, assignment, depth + 1)) orelse return null;
+
+                if (std.mem.eql(u8, operator, "&&") or std.mem.eql(u8, operator, "||") or std.mem.eql(u8, operator, "??")) {
+                    const c = switch (left) {
+                        .constant => |c| c,
+                        .spec => return null,
+                    };
+                    const take_left = if (std.mem.eql(u8, operator, "&&")) !const_truthy(c) else if (std.mem.eql(u8, operator, "||")) const_truthy(c) else c != .absent;
+                    return if (take_left) left else gen.prop_eval(operation_ir.right, assignment, depth + 1);
+                }
+
+                const right = (try gen.prop_eval(operation_ir.right, assignment, depth + 1)) orelse return null;
+                const equality = std.mem.eql(u8, operator, "===") or std.mem.eql(u8, operator, "==");
+                const inequality = std.mem.eql(u8, operator, "!==") or std.mem.eql(u8, operator, "!=");
+
+                if (equality or inequality) {
+                    if (left == .constant and right == .constant) {
+                        return .{ .constant = .{ .boolean = const_equal(left.constant, right.constant) == equality } };
+                    }
+                    if (left == .spec and right == .spec) return null;
+                    const spec = if (left == .spec) left.spec else right.spec;
+                    const other = if (left == .spec) right.constant else left.constant;
+                    const literal = (try gen.const_wire_text(other)) orelse return null;
+                    return .{ .spec = try std.fmt.allocPrint(gen.arena, "rt.concat(arena, &.{{ rt.wire_group(arena, {s}), {s} }})", .{
+                        spec,
+                        try zig_string(gen.arena, try std.fmt.allocPrint(gen.arena, " {s} {s}", .{ if (equality) "==" else "!=", literal })),
+                    }) };
+                }
+
+                if (std.mem.eql(u8, operator, "+")) {
+                    if (left == .constant and right == .constant) {
+                        if (left.constant == .number and right.constant == .number) return .{ .constant = .{ .number = left.constant.number + right.constant.number } };
+                        if (left.constant == .string and right.constant == .string) {
+                            return .{ .constant = .{ .string = try std.fmt.allocPrint(gen.arena, "{s}{s}", .{ left.constant.string, right.constant.string }) } };
+                        }
+                        return null;
+                    }
+                    return .{ .spec = try std.fmt.allocPrint(gen.arena, "rt.concat(arena, &.{{ {s}, \" + \", {s} }})", .{
+                        (try gen.prop_operand(left)) orelse return null,
+                        (try gen.prop_operand(right)) orelse return null,
+                    }) };
+                }
+                return null;
+            },
+            .conditional => |c| {
+                const test_value = (try gen.prop_eval(c.@"test", assignment, depth + 1)) orelse return null;
+                switch (test_value) {
+                    .constant => |value| return gen.prop_eval(if (const_truthy(value)) c.consequent else c.alternate, assignment, depth + 1),
+                    .spec => |code| {
+                        var arms: [2][]const u8 = undefined;
+                        for ([_]*const ExpressionIR{ c.consequent, c.alternate }, 0..) |arm, index| {
+                            arms[index] = switch ((try gen.prop_eval(arm, assignment, depth + 1)) orelse return null) {
+                                .spec => |arm_code| arm_code,
+                                .constant => |value| if (value == .absent) "null" else try zig_string(gen.arena, (try gen.const_wire_text(value)) orelse return null),
+                            };
+                        }
+                        return .{ .spec = try std.fmt.allocPrint(gen.arena, "rt.wire_match(arena, {s}, &.{{ .{{ .key = \"true\", .value = {s} }}, .{{ .key = \"false\", .value = {s} }} }})", .{ code, arms[0], arms[1] }) };
+                    },
+                }
+            },
+            .template => |template_ir| {
+                var text: std.Io.Writer.Allocating = .init(gen.arena);
+                var operands: std.ArrayList([]const u8) = .empty;
+                var all_constant = true;
+                for (template_ir.parts) |part| {
+                    const value: PropEval = switch (part) {
+                        .string => |literal| .{ .constant = .{ .string = literal } },
+                        .expression => |part_expr| (try gen.prop_eval(part_expr, assignment, depth + 1)) orelse return null,
+                    };
+                    switch (value) {
+                        .constant => |c| switch (c) {
+                            .string => |literal| try text.writer.writeAll(literal),
+                            .number => |n| try text.writer.writeAll(try util.numberToString(gen.arena, n)),
+                            else => return null,
+                        },
+                        .spec => |code| {
+                            all_constant = false;
+                            if (text.written().len > 0) {
+                                try operands.append(gen.arena, try zig_string(gen.arena, (try gen.const_wire_text(.{ .string = text.written() })) orelse return null));
+                                text = .init(gen.arena);
+                            }
+                            try operands.append(gen.arena, try std.fmt.allocPrint(gen.arena, "rt.wire_group(arena, {s})", .{code}));
+                        },
+                    }
+                }
+                if (all_constant) return .{ .constant = .{ .string = text.written() } };
+                if (text.written().len > 0) {
+                    try operands.append(gen.arena, try zig_string(gen.arena, (try gen.const_wire_text(.{ .string = text.written() })) orelse return null));
+                }
+                var joined: std.Io.Writer.Allocating = .init(gen.arena);
+                for (operands.items, 0..) |operand, index| {
+                    if (index > 0) try joined.writer.writeAll(" \" + \",");
+                    try joined.writer.print(" {s},", .{operand});
+                }
+                return .{ .spec = try std.fmt.allocPrint(gen.arena, "rt.concat(arena, &.{{{s} }})", .{joined.written()}) };
+            },
+            else => return null,
+        }
     }
 
     // -- expressions as Zig values --
@@ -3325,10 +4083,11 @@ const Generator = struct {
                 }
                 return gen.fail("expression kind \"call\" is not lowered here", .{});
             },
-            // An empty array literal (`value ?? []`) is an empty string slice —
-            // the only array literal the corpus authors.
+            // An empty array literal (`value ?? []`) is an empty string slice
+            // unless a type assertion (`[] as Row[]`) gives its items.
             .array => |array| {
                 if (array.items.len == 0) {
+                    if (array.asserted) |spec| if (spec.fields != null) return gen.asserted_array(e, spec);
                     return .{ .code = "&.{}", .type = .strings };
                 }
                 return gen.fail("a non-empty array literal is not lowered", .{});
@@ -3377,8 +4136,14 @@ const Generator = struct {
 
                     const key = try gen.member_index(member.property);
 
+                    // `TONES[kind]` keyed by a string: an optional string,
+                    // null when no entry matches (`TONES[kind] ?? "accent"`).
+                    if (key.type == .string) {
+                        return .{ .code = try gen.string_keyed_lookup(object.type.finite_map, key.code, null, null), .type = .opt_string };
+                    }
+
                     if (key.type != .enumeration) {
-                        return gen.fail("a finite map is keyed by a {s}; only enum keys are lowered", .{@tagName(key.type)});
+                        return gen.fail("a finite map is keyed by a {s}; only enum and string keys are lowered", .{@tagName(key.type)});
                     }
 
                     return .{
@@ -3459,6 +4224,27 @@ const Generator = struct {
         }
     }
 
+    /// An empty literal typed by its assertion: the item struct (and its
+    /// enums) is declared at file scope and the literal is an empty slice of
+    /// it.
+    fn asserted_array(gen: *Generator, e: *const ExpressionIR, spec: *const analyze.PropSchema) Error!Lowered {
+        for (gen.asserted_arrays.items) |entry| {
+            if (entry.expression == e) return entry.lowered;
+        }
+        var schema: analyze.Schema = .init(gen.arena);
+        const name = try gen.fresh("asserted");
+        try schema.put(name, spec.*);
+        var types: std.Io.Writer.Allocating = .init(gen.arena);
+        const fields = try adapt_props(gen.arena, &schema, &types.writer, gen.module.name);
+        try gen.asserted_types.appendSlice(gen.arena, types.written());
+        const lowered: Lowered = .{
+            .code = try std.fmt.allocPrint(gen.arena, "@as({s}, &.{{}})", .{fields[0].zig_type}),
+            .type = fields[0].type,
+        };
+        try gen.asserted_arrays.append(gen.arena, .{ .expression = e, .lowered = lowered });
+        return lowered;
+    }
+
     /// A computed member property as a lowered index expression.
     fn member_index(gen: *Generator, property: compiler.MemberProperty) Error!Lowered {
         return switch (property) {
@@ -3529,6 +4315,12 @@ const Generator = struct {
                 for (gen.module.finite_maps) |map| {
                     if (std.mem.eql(u8, map.name, name)) {
                         return .{ .code = "", .type = .{ .finite_map = map.entries } };
+                    }
+                }
+
+                for (gen.module.string_constants) |constant| {
+                    if (std.mem.eql(u8, constant.key, name)) {
+                        return .{ .code = try zig_string(gen.arena, constant.value), .type = .string };
                     }
                 }
 
@@ -3750,6 +4542,12 @@ const Generator = struct {
 
     /// `` `/post/${slug}` `` → `try std.fmt.allocPrint(arena, "/post/{s}", .{slug})`.
     fn template(gen: *Generator, e: *const ExpressionIR) Error!Lowered {
+        return (try gen.template_with(e, false)).?;
+    }
+
+    /// The template with each part lowered as its SSR initial when `own`
+    /// (null when a part has none the server can render).
+    fn template_with(gen: *Generator, e: *const ExpressionIR, own: bool) Error!?Lowered {
         var format: std.Io.Writer.Allocating = .init(gen.arena);
         var arguments: std.Io.Writer.Allocating = .init(gen.arena);
 
@@ -3768,7 +4566,10 @@ const Generator = struct {
                 .expression => |part_expr| part_expr,
             };
 
-            const lowered = try gen.expression(part_expr);
+            const lowered = if (own) switch ((try gen.own_initial(part_expr)) orelse OwnInitial{ .lowered = try gen.expression(part_expr) }) {
+                .lowered => |initial| initial,
+                .unservable => return null,
+            } else try gen.expression(part_expr);
 
             switch (lowered.type) {
                 .string => try format.writer.writeAll("{s}"),
@@ -3851,6 +4652,33 @@ const Generator = struct {
         try out.writer.writeAll(" })");
 
         return .{ .code = out.written(), .type = .string };
+    }
+
+    /// `TONES[kind]` keyed by a string: a labeled block comparing the key
+    /// with each entry, breaking with the entry's value and with `fallback`
+    /// (null when not given) when none matches. The values are strings, or
+    /// tags of `target` when given — enum literals typed by the block's
+    /// result location, since the enum may be the callee's.
+    fn string_keyed_lookup(gen: *Generator, entries: []const Type.MapEntry, key_code: []const u8, target: ?Type.Enumeration, fallback: ?[]const u8) Error![]const u8 {
+        const label = try gen.fresh("publr_lookup");
+        const key = try gen.fresh("publr_key");
+        var out: std.Io.Writer.Allocating = .init(gen.arena);
+
+        try out.writer.print("({s}: {{ const {s} = {s};", .{ label, key, key_code });
+
+        for (entries) |entry| {
+            const value = if (target) |e| blk: {
+                if (!util.containsString(e.values, entry.value)) {
+                    return gen.fail("\"{s}\" is not a value of the {s} enum", .{ entry.value, e.name });
+                }
+                break :blk try std.fmt.allocPrint(gen.arena, ".@\"{s}\"", .{entry.value});
+            } else try std.fmt.allocPrint(gen.arena, "@as(?[]const u8, {s})", .{try zig_string(gen.arena, entry.value)});
+            try out.writer.print(" if (std.mem.eql(u8, {s}, {s})) break :{s} {s};", .{ key, try zig_string(gen.arena, entry.key), label, value });
+        }
+
+        try out.writer.print(" break :{s} {s}; }})", .{ label, fallback orelse if (target == null) "@as(?[]const u8, null)" else "null" });
+
+        return out.written();
     }
 
     /// `SIZES[size]` filling an enum prop (`SPINNER_SIZES[size]` → Icon's

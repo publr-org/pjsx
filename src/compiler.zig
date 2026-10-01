@@ -74,7 +74,9 @@ pub const ExpressionIR = union(enum) {
     operation: struct { operator: []const u8, left: *const ExpressionIR, right: *const ExpressionIR },
     conditional: struct { @"test": *const ExpressionIR, consequent: *const ExpressionIR, alternate: *const ExpressionIR },
     template: struct { parts: []const TemplatePart },
-    array: struct { items: []const *const ExpressionIR },
+    /// `asserted` is the array's TypeScript assertion (`[] as Row[]`) as an
+    /// array prop schema, so an empty literal keeps its item type.
+    array: struct { items: []const *const ExpressionIR, asserted: ?*const analyze.PropSchema = null },
     object: struct { fields: []const ObjectFieldIR },
     call: struct { callee: *const ExpressionIR, arguments: []const *const ExpressionIR },
     function: struct { parameters: []const []const u8, body: *const ExpressionIR, locals: []const LocalIR = &.{} },
@@ -171,6 +173,9 @@ pub const ModuleIR = struct {
     classes: []const []const u8,
     /// Module-level `const X = { key: "literal" }` lookup tables.
     finite_maps: analyze.FiniteStringMaps,
+    /// Module-level `const X = "literal"` values. In-process targets only; the JSON IR
+    /// does not carry them.
+    string_constants: []const StringConstant = &.{},
     /// Sorted for determinism.
     capabilities: []const Capability,
     /// Legacy authoring preserves historical presence guards. The portable
@@ -288,7 +293,7 @@ fn expressionIR(allocator: Allocator, node: *Node, parsed: *const analyze.Parsed
             for (value.elements) |element| {
                 if (element) |item| try items.append(allocator, try expressionIR(allocator, item, parsed));
             }
-            return box(allocator, .{ .array = .{ .items = try items.toOwnedSlice(allocator) } });
+            return box(allocator, .{ .array = .{ .items = try items.toOwnedSlice(allocator), .asserted = try assertedArray(allocator, node, parsed) } });
         },
         .ObjectExpression => {
             var fields: std.ArrayList(ObjectFieldIR) = .empty;
@@ -629,9 +634,21 @@ pub fn createPjsxModuleWithResolver(allocator: Allocator, original_source: []con
         },
         .classes = try analyze.collectClassTokens(allocator, parsed),
         .finite_maps = try analyze.collectFiniteStringMaps(allocator, parsed.program),
+        .string_constants = try stringConstantsIR(allocator, parsed.program),
         .capabilities = try capabilitiesOf(allocator, root, parsed),
     };
     return module;
+}
+
+pub const StringConstant = struct { name: []const u8, value: []const u8 };
+
+fn stringConstantsIR(allocator: Allocator, program: *Node) Error![]const StringConstant {
+    const constants = try analyze.collectStringConstants(allocator, program);
+    const list = try allocator.alloc(StringConstant, constants.count());
+    for (constants.keys(), constants.values(), 0..) |name, value, index| {
+        list[index] = .{ .name = name, .value = value };
+    }
+    return list;
 }
 
 fn localBindingsIR(allocator: Allocator, parsed: *const analyze.ParsedModule) Error![]const LocalIR {
@@ -683,6 +700,23 @@ fn initialIR(allocator: Allocator, initial_state: *Node, parsed: *const analyze.
         try fields.append(allocator, .{ .field = key.name, .value = value });
     }
     return fields.items;
+}
+
+/// The outermost `as`/`satisfies` type over an array literal, as an array
+/// prop schema (see `ExpressionIR.array`).
+fn assertedArray(allocator: Allocator, node: *Node, parsed: *const analyze.ParsedModule) Error!?*const analyze.PropSchema {
+    var current = node;
+    while (current.type == .TSAsExpression or current.type == .TSNonNullExpression or current.type == .TSSatisfiesExpression or current.type == .ParenthesizedExpression) {
+        if (current.type != .TSNonNullExpression and current.type != .ParenthesizedExpression) {
+            const annotation = current.type_annotation orelse break;
+            const spec = @import("types.zig").assertedArray(allocator, parsed.program, parsed.canonical, "", annotation.slice(parsed.canonical)) orelse return null;
+            const boxed = try allocator.create(analyze.PropSchema);
+            boxed.* = spec;
+            return boxed;
+        }
+        current = current.expression.?;
+    }
+    return null;
 }
 
 fn refNames(allocator: Allocator, refs: []const analyze.RefBinding) Allocator.Error![]const []const u8 {

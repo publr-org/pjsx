@@ -600,6 +600,18 @@ fn objectSchema(c: *Context, object: *Type) Error!*analyze.Schema {
     return schema;
 }
 
+/// The asserted type of an array value (`[] as Row[]`) as an array prop
+/// schema, so an empty literal keeps its item fields. Null when the type is
+/// not an array or cannot be resolved in the module (an imported alias
+/// without a resolver).
+pub fn assertedArray(a: Allocator, program: *ast.Node, source: []const u8, filename: []const u8, annotation: []const u8) ?analyze.PropSchema {
+    var c = Context.init(a, null);
+    const m = c.add(filename, source, program) catch return null;
+    const t = c.textType(m, annotation) catch return null;
+    if (t.kind != .array) return null;
+    return propSpec(&c, t, false) catch null;
+}
+
 pub const InferredProps = struct { schema: *analyze.Schema, contract: *Type };
 
 pub fn infer(a: Allocator, program: *ast.Node, source: []const u8, filename: []const u8, function: *ast.Node, resolver: ?Resolver) Error!InferredProps {
