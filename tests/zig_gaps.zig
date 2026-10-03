@@ -617,3 +617,39 @@ test "closed gap: a wired optional prop is present, and a wired class list cross
     const spinner = try compile(arena.allocator(), &sources, "Spinner");
     try expectMatch(spinner, "\"data-p-class\", rt\\.join_optionals\\(arena, &\\.\\{ \\(if \\(\\(if \\(props\\.publr_bind_classes != null\\) @as\\(\\?\\[\\]const u8, rt\\.wire_value\\(arena, props\\.publr_bind_classes, props\\.classes\\)\\) else @as\\(\\?\\[\\]const u8, null\\)\\)\\) \\|publr_classes\\| @as\\(\\?\\[\\]const u8, rt\\.concat\\(arena, &\\.\\{ \"\\(\", publr_classes, \"\\)\" \\}\\)\\)", "");
 }
+
+test "closed gap: a row of a reactive list reads the module's other state" {
+    // publr's currency table: the default radio of each row compares the row's
+    // position with `state.chosen`, a sibling field of the list it renders.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const code = try lowers(arena.allocator(), "Picks",
+        \\
+        \\import { Publr } from "publr-jsx";
+        \\export const state = Publr.reactive({ rows: [] as { index: number; code: string }[], chosen: 0 });
+        \\export function Picks() {
+        \\  return <ul>
+        \\    {state.rows.map((row) => <li data-chosen={state.chosen === 1 ? "yes" : "no"}>{row.code}</li>)}
+        \\  </ul>;
+        \\}
+    );
+    try expectMatch(code, "data-chosen:\\$chosen == 1 -&gt; 'yes' ~ 'no'", "");
+}
+
+test "closed gap: a wire compares one state value with another" {
+    // publr's currency table: the default radio of each row is
+    // `state.chosen === row.index`, which the runtime follows on both sides.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const code = try lowers(arena.allocator(), "PicksBoth",
+        \\
+        \\import { Publr } from "publr-jsx";
+        \\export const state = Publr.reactive({ rows: [] as { index: number; code: string }[], chosen: 0 });
+        \\export function PicksBoth() {
+        \\  return <ul>
+        \\    {state.rows.map((row) => <li data-chosen={state.chosen === row.index ? "yes" : "no"}>{row.code}</li>)}
+        \\  </ul>;
+        \\}
+    );
+    try expectMatch(code, "data-chosen:\\$chosen == \\$row.index -&gt; 'yes' ~ 'no'", "");
+}

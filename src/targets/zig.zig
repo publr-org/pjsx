@@ -1090,6 +1090,10 @@ const Generator = struct {
             const right_initial = try gen.own_initial(e.operation.right);
             if (left_initial != null or right_initial != null) {
                 if ((left_initial != null and left_initial.? == .unservable) or (right_initial != null and right_initial.? == .unservable)) return .unservable;
+                // A side that is a wire with no value here (a list row's alias in its
+                // prototype) leaves the whole comparison to the runtime.
+                if (left_initial == null and gen.wire_state_path(e.operation.left) != null) return .unservable;
+                if (right_initial == null and gen.wire_state_path(e.operation.right) != null) return .unservable;
                 const left = if (left_initial) |initial| initial.lowered else try gen.expression(e.operation.left);
                 const right = if (right_initial) |initial| initial.lowered else try gen.expression(e.operation.right);
                 return .{ .lowered = try gen.operation_values(e, left, right) };
@@ -3355,6 +3359,11 @@ const Generator = struct {
         if (gen.dataset_name(e)) |name| {
             return try std.fmt.allocPrint(gen.arena, "@{s}", .{name});
         }
+        // Another state value (`state.chosen === row.index`): the runtime reads and
+        // follows both sides.
+        if (gen.wire_state_path(e)) |path| {
+            if (path.spec.len > 0) return try std.fmt.allocPrint(gen.arena, "${s}", .{path.spec});
+        }
         return gen.wire_literal(e);
     }
 
@@ -4282,6 +4291,11 @@ const Generator = struct {
                 }
 
                 if (gen.module.wire) |wire| {
+                    // Inside a closure (a list's row) the module's own state is
+                    // a plain local of its exported name.
+                    if (wire.state_name) |state| {
+                        if (std.mem.eql(u8, state, name)) return .{ .code = "", .type = .state_root };
+                    }
                     for (wire.actions) |action| {
                         if (std.mem.eql(u8, action, name)) {
                             return .{ .code = try zig_string(gen.arena, name), .type = .action_name };
