@@ -73,11 +73,11 @@ test "compiler gap: an inline arrow event handler cannot lower" {
     , "expression kind \"function\" is not lowered here");
 }
 
-test "compiler gap: a JSX-valued component prop cannot lower" {
+test "closed gap: a JSX-valued component prop lowers as a block node" {
     // design-system-v2 BoxControl.next: actions={<span class="contents">…</span>}
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    try rejectsSet(arena.allocator(), "BoxControl", &.{
+    const code = try compile(arena.allocator(), &.{
         .{
             "StyleControl.ptsx",
             \\export const styleControlProps = {
@@ -96,7 +96,8 @@ test "compiler gap: a JSX-valued component prop cannot lower" {
             \\  return <StyleControl title="Padding" actions={<span class="contents">x</span>} />;
             \\}
         },
-    }, "expression kind \"node\" is not lowered here");
+    }, "BoxControl");
+    try expectMatch(code, "\\.actions = rt\\.block\\(&markup_[0-9]+, Markup_[0-9]+\\),", "");
 }
 
 test "closed gap: an array map may take a primitive-member body" {
@@ -636,6 +637,24 @@ test "closed gap: a row of a reactive list reads the module's other state" {
     try expectMatch(code, "data-chosen:\\$chosen == 1 -&gt; 'yes' ~ 'no'", "");
 }
 
+test "closed gap: a row whose body is a guard lands in a wrapper that holds the row" {
+    // publr's record actions: `state.actions.map((item) => item.primary && <form>…</form>)`.
+    // The row's store belongs on one element; on the guard's bare anchor the form it
+    // mounts is a sibling and reads no `$item`.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const code = try lowers(arena.allocator(), "Actions",
+        \\import { Publr } from "publr-jsx";
+        \\export const state = Publr.reactive({ actions: [] as { label: string; primary: boolean }[] });
+        \\export function Actions() {
+        \\  return <div>
+        \\    {state.actions.map((item) => item.primary && <button>{item.label}</button>)}
+        \\  </div>;
+        \\}
+    );
+    try expectMatch(code, "data-p-for=\\\\\"item of \\$actions\\\\\"><span class=\\\\\"contents\\\\\"><template data-p-template=\\\\\"[A-Za-z]+-1\\\\\" data-p-if=\\\\\"\\$item\\.primary\\\\\">", "");
+}
+
 test "closed gap: a wire compares one state value with another" {
     // publr's currency table: the default radio of each row is
     // `state.chosen === row.index`, which the runtime follows on both sides.
@@ -652,4 +671,148 @@ test "closed gap: a wire compares one state value with another" {
         \\}
     );
     try expectMatch(code, "data-chosen:\\$chosen == \\$row.index -&gt; 'yes' ~ 'no'", "");
+}
+
+test "closed gap: null against an optional prop" {
+    // FolderNavItemLink drops a disabled entry's link: `disabled ? undefined : href`, where
+    // `href` may already be absent.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const code = try lowers(arena.allocator(), "Link",
+        \\export type LinkProps = { href?: string; disabled?: boolean };
+        \\export function Link({ href, disabled = false }: LinkProps) {
+        \\  return <a href={disabled ? undefined : href}>x</a>;
+        \\}
+    );
+    try expectMatch(code, "@as\\(\\?\\[\\]const u8, null\\) else @as\\(\\?\\[\\]const u8, props\\.href\\)", "");
+}
+
+const TestRequest = struct {
+    session: struct { name: []const u8, email: []const u8 },
+    signed_in: bool,
+};
+
+fn lowersWithRequest(a: std.mem.Allocator, sources: []const [2][]const u8, which: []const u8) ![]const u8 {
+    var irs: std.ArrayList(*const pjsx.compiler.ModuleIR) = .empty;
+    for (sources) |pair| {
+        try irs.append(a, try pjsx.compiler.createPjsxModule(a, pair[1], pair[0]));
+    }
+    var program = try pjsx.targets.zig.Program.init(a, irs.items);
+    program.request = pjsx.targets.zig.requestFields(TestRequest);
+    return program.lower(a, which) catch |e| {
+        std.debug.print("\npjsx diagnostic: {s}\n", .{pjsx.lastError()});
+        return e;
+    };
+}
+
+test "closed gap: a server render reads the request it was handed" {
+    // publr's admin chrome reads who is signed in from the request, not from props
+    // every page forwards.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const code = try lowersWithRequest(arena.allocator(), &.{.{ "Rail.ptsx",
+        \\import { Publr } from "publr-jsx";
+        \\export function Rail() {
+        \\  return <nav>{Publr.request.signed_in && <span>{Publr.request.session.email}</span>}</nav>;
+        \\}
+    }}, "Rail");
+    try expectMatch(code, "const Request = @import\\(\"request\"\\)\\.Request;", "");
+    try expectMatch(code, "publr_request: \\?\\*const anyopaque = null,", "");
+    try expectMatch(code, "props\\.publr_request orelse", "");
+    try expectMatch(code, "\\)\\.\\*\\.session\\.email", "");
+}
+
+test "closed gap: every component call hands the request down" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const code = try lowersWithRequest(arena.allocator(), &.{
+        .{ "Inner.ptsx",
+        \\export function Inner() { return <span>hi</span>; }
+        },
+        .{ "Outer.ptsx",
+        \\import { Inner } from "./Inner.ptsx";
+        \\export function Outer() { return <div><Inner /></div>; }
+        },
+    }, "Outer");
+    try expectMatch(code, "Inner\\.render\\(w, arena, \\.\\{ \\.publr_request = props\\.publr_request,", "");
+}
+
+test "compiler gap: Publr.request without a declared request is rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try rejects(arena.allocator(), "Rail",
+        \\import { Publr } from "publr-jsx";
+        \\export function Rail() { return <nav>{Publr.request.session.email}</nav>; }
+    , "declares no request");
+}
+
+test "closed gap: a flag guards a node prop" {
+    // publr's FormBody: `{!bare && header}`, where `header` is an optional node.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const code = try lowers(arena.allocator(), "Body",
+        \\export type BodyProps = { bare?: boolean; header?: JSX.Element };
+        \\export function Body({ bare = false, header }: BodyProps) {
+        \\  return <div>{!bare && header}</div>;
+        \\}
+    );
+    try expectMatch(code, "@as\\(\\?rt\\.Node, ", "");
+}
+
+test "closed gap: a literal list of objects fills an array prop" {
+    // publr's pages name their parents in the crumbs: `parents={[{ label, href }]}`.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const code = try lowersWithRequest(arena.allocator(), &.{
+        .{ "Trail.ptsx",
+        \\export type TrailProps = { parents: Array<{ label: string; href: string }> };
+        \\export function Trail({ parents }: TrailProps) {
+        \\  return <ol>{parents.map((parent) => <li><a href={parent.href}>{parent.label}</a></li>)}</ol>;
+        \\}
+        },
+        .{ "Page.ptsx",
+        \\import { Trail } from "./Trail.ptsx";
+        \\export function Page() { return <Trail parents={[{ label: "Structure", href: "/admin/structure" }]} />; }
+        },
+    }, "Page");
+    try expectMatch(code, "\\.parents = &\\[_\\]Trail\\.ParentsItem\\{ \\.\\{ \\.label = \"Structure\", \\.href = \"/admin/structure\", \\},", "");
+}
+
+test "closed gap: markup fills a node prop, absent when guarded off" {
+    // publr's layouts take slots: `actions={<Button/>}`, `empty={none && <Empty/>}`.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const code = try lowersWithRequest(arena.allocator(), &.{
+        .{ "Frame.ptsx",
+        \\export type FrameProps = { actions?: JSX.Element; empty?: JSX.Element };
+        \\export function Frame({ actions, empty }: FrameProps) {
+        \\  return <div>{actions}{empty && <p>{empty}</p>}</div>;
+        \\}
+        },
+        .{ "Page.ptsx",
+        \\import { Frame } from "./Frame.ptsx";
+        \\export type PageProps = { none: boolean; label: string };
+        \\export function Page({ none, label }: PageProps) {
+        \\  return <Frame actions={<b>{label}</b>} empty={none && <i>nothing</i>} />;
+        \\}
+        },
+    }, "Page");
+    try expectMatch(code, "\\.actions = rt\\.block\\(&markup_[0-9]+, Markup_[0-9]+\\),", "");
+    try expectMatch(code, "\\.empty = \\(if \\(props\\.none\\) @as\\(\\?rt\\.Node, rt\\.block\\(&markup_[0-9]+, Markup_[0-9]+\\)\\) else null\\),", "");
+}
+
+test "closed gap: a module names the component its root is drawn by" {
+    // publr holds its admin pages to its layouts: `render.page` checks `root_component`.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const code = try compile(arena.allocator(), &.{
+        .{ "Frame.ptsx",
+        \\export function Frame() { return <main />; }
+        },
+        .{ "Page.ptsx",
+        \\import { Frame } from "./Frame.ptsx";
+        \\export function Page() { return <Frame />; }
+        },
+    }, "Page");
+    try expectMatch(code, "pub const root_component: \\[\\]const u8 = \"Frame\";", "");
 }

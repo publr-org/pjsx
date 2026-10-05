@@ -29,11 +29,17 @@ const class_merge = @import("class_merge");
 pub const Node = struct {
     raw: ?[]const u8 = null,
     ctx: *const anyopaque = undefined,
-    render_fn: ?*const fn (*const anyopaque, *std.Io.Writer, std.mem.Allocator) anyerror!void = null,
+    render_fn: ?*const fn (*const anyopaque, *std.Io.Writer, std.mem.Allocator, ?*const anyopaque) anyerror!void = null,
 
     pub fn render(node: Node, w: *std.Io.Writer, arena: std.mem.Allocator) anyerror!void {
+        return node.render_with(w, arena, null);
+    }
+
+    /// Rendered by a component holding the request (`Publr.request`): a node made ahead of
+    /// time for the page (`viewed`) reads it as its own; children read their caller's.
+    pub fn render_with(node: Node, w: *std.Io.Writer, arena: std.mem.Allocator, request: ?*const anyopaque) anyerror!void {
         if (node.raw) |html| return w.writeAll(html);
-        return node.render_fn.?(node.ctx, w, arena);
+        return node.render_fn.?(node.ctx, w, arena, request);
     }
 
     /// The JavaScript truthiness of a node: whether it renders anything. A raw
@@ -60,9 +66,23 @@ pub fn raw(html: []const u8) Node {
 pub fn block(capture: anytype, comptime Body: type) Node {
     const Capture = @TypeOf(capture.*);
     const Thunk = struct {
-        fn call(ctx: *const anyopaque, w: *std.Io.Writer, arena: std.mem.Allocator) anyerror!void {
+        fn call(ctx: *const anyopaque, w: *std.Io.Writer, arena: std.mem.Allocator, request: ?*const anyopaque) anyerror!void {
+            _ = request;
             const self: *const Capture = @ptrCast(@alignCast(ctx));
             return Body.render(self.*, w, arena);
+        }
+    };
+    return .{ .ctx = capture, .render_fn = &Thunk.call };
+}
+
+/// A view rendered ahead of time as a node for a page: `Body.render(capture, w, arena,
+/// request)` gets the request of whichever component reaches it, so it reads the page's.
+pub fn viewed(capture: anytype, comptime Body: type) Node {
+    const Capture = @TypeOf(capture.*);
+    const Thunk = struct {
+        fn call(ctx: *const anyopaque, w: *std.Io.Writer, arena: std.mem.Allocator, request: ?*const anyopaque) anyerror!void {
+            const self: *const Capture = @ptrCast(@alignCast(ctx));
+            return Body.render(self.*, w, arena, request);
         }
     };
     return .{ .ctx = capture, .render_fn = &Thunk.call };
@@ -187,6 +207,46 @@ test "array prop conversion reports allocation failures at every nesting level" 
 }
 
 /// Writes `text` with the five HTML-special characters entity-escaped.
+/// The path the project is served under (`/environments/dev`, empty at the root), before a
+/// literal root path in a URL attribute (`href="/admin"`).
+pub fn write_url_base(w: *std.Io.Writer, base: []const u8) !void {
+    try w.writeAll(base);
+}
+
+/// `base` before `value` when it is a root path that does not carry it already: a path the
+/// browser sent back (a `return`, the page's own address) has it; one the server wrote
+/// (`/admin/content`) does not.
+pub fn write_url_base_for(w: *std.Io.Writer, base: []const u8, value: []const u8) !void {
+    if (needs_base(base, value)) {
+        try w.writeAll(base);
+    }
+}
+
+/// Whether a root path is missing `base`: never for another host (`//…`), a full address, a
+/// fragment, or a path already at or under it.
+pub fn needs_base(base: []const u8, value: []const u8) bool {
+    if (base.len == 0 or value.len == 0 or value[0] != '/') return false;
+    if (value.len > 1 and value[1] == '/') return false;
+    if (!std.mem.startsWith(u8, value, base)) return true;
+
+    const rest = value[base.len..];
+
+    return !(rest.len == 0 or rest[0] == '/' or rest[0] == '?' or rest[0] == '#');
+}
+
+test "a root path is written under the base, once" {
+    try std.testing.expect(needs_base("/environments/dev", "/admin"));
+    try std.testing.expect(needs_base("/environments/dev", "/"));
+    try std.testing.expect(needs_base("/environments/dev", "/environments/devx"));
+    try std.testing.expect(!needs_base("/environments/dev", "/environments/dev/admin"));
+    try std.testing.expect(!needs_base("/environments/dev", "/environments/dev"));
+    try std.testing.expect(!needs_base("/environments/dev", "/environments/dev?x=1"));
+    try std.testing.expect(!needs_base("/environments/dev", "//cdn.example/a.js"));
+    try std.testing.expect(!needs_base("/environments/dev", "https://example.com/"));
+    try std.testing.expect(!needs_base("/environments/dev", "#top"));
+    try std.testing.expect(!needs_base("", "/admin"));
+}
+
 pub fn escape(w: *std.Io.Writer, text: []const u8) !void {
     for (text) |char| {
         switch (char) {

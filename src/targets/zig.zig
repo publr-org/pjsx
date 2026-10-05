@@ -202,6 +202,79 @@ const void_elements = [_][]const u8{
 
 // ---- the public surface ----------------------------------------------------
 
+/// The fields of a consumer's request struct, for `Program.request`: strings, booleans,
+/// numbers, nodes (any struct with a `render_fn`), their optionals, string slices and
+/// nested structs, which read as items.
+pub fn requestFields(comptime Request: type) []const Field {
+    return comptime request_fields_of(Request);
+}
+
+fn request_fields_of(comptime Request: type) []const Field {
+    const declared = @typeInfo(Request).@"struct".fields;
+    var fields: [declared.len]Field = undefined;
+    for (declared, 0..) |field, index| {
+        fields[index] = .{
+            .name = field.name,
+            .type = request_type(field.type),
+            .zig_type = @typeName(field.type),
+            .default = null,
+        };
+    }
+    const done = fields;
+    return &done;
+}
+
+fn request_type(comptime Value: type) Type {
+    if (Value == []const u8) return .string;
+    if (Value == ?[]const u8) return .opt_string;
+    if (Value == bool) return .boolean;
+    if (Value == ?bool) return .opt_boolean;
+    if (Value == f64) return .number;
+    if (Value == ?f64) return .opt_number;
+    if (Value == []const []const u8) return .strings;
+    if (@typeInfo(Value) == .optional) {
+        const child = @typeInfo(Value).optional.child;
+        if (@typeInfo(child) == .@"struct" and @hasField(child, "render_fn")) return .opt_node;
+    }
+    if (@typeInfo(Value) == .@"struct") {
+        if (@hasField(Value, "render_fn")) return .node;
+        return .{ .item = request_fields_of(Value) };
+    }
+    @compileError("a request field of type " ++ @typeName(Value) ++ " is not readable");
+}
+
+fn root_component_of(root: *const NodeIR) []const u8 {
+    return switch (root.*) {
+        .element => |element| switch (element.name) {
+            .component => |component| component.name,
+            else => "",
+        },
+        else => "",
+    };
+}
+
+/// Attributes whose value is an address the browser follows or loads.
+fn is_url_attribute(name: []const u8) bool {
+    const names = [_][]const u8{ "href", "src", "action", "formaction", "poster" };
+
+    for (names) |candidate| {
+        if (std.mem.eql(u8, name, candidate)) return true;
+    }
+
+    return false;
+}
+
+/// `/admin`, not `//cdn.example` (another host) nor `#top` or `https://…`.
+fn root_path(text: []const u8) bool {
+    return text.len > 0 and text[0] == '/' and (text.len == 1 or text[1] != '/');
+}
+
+fn is_publr_request(member: anytype) bool {
+    if (member.property != .string or !util.eql(member.property.string, "request")) return false;
+    if (member.object.* != .reference) return false;
+    return util.eql(member.object.reference.name, "Publr");
+}
+
 pub const ZigOutput = struct { code: []const u8 };
 
 /// A whole compile set: the adapted modules, sorted by name. Components
@@ -209,6 +282,13 @@ pub const ZigOutput = struct { code: []const u8 };
 /// be in the same program.
 pub const Program = struct {
     modules: []const Module,
+    /// What `Publr.request` holds in a server render: the fields of the consumer's
+    /// `Request` (`requestFields`). Empty when the consumer declares none, and a read
+    /// of `Publr.request` then fails the build.
+    request: []const Field = &.{},
+    /// Where in the request the path the project is served under is (`admin.base`): a root
+    /// path in a URL attribute (`href="/admin"`) is written after it. Empty: written as is.
+    url_base: []const u8 = "",
 
     pub fn init(arena: std.mem.Allocator, irs: []const *const compiler.ModuleIR) Error!Program {
         var modules = try arena.alloc(Module, irs.len);
@@ -224,6 +304,8 @@ pub const Program = struct {
         for (program.modules) |module| {
             if (std.mem.eql(u8, module.name, name)) {
                 var gen: Generator = .init(arena, module, program.modules);
+                gen.request = program.request;
+                gen.url_base = program.url_base;
                 return gen.lower_module();
             }
         }
@@ -764,6 +846,11 @@ const Generator = struct {
     counter: u32,
     arena_used: bool,
     props_used: bool,
+    /// The request a server render reads as `Publr.request`, declared by the program.
+    request: []const Field = &.{},
+    request_used: bool = false,
+    /// `Program.url_base`.
+    url_base: []const u8 = "",
     /// A sibling family this module binds to through its imports
     /// (`import { state, toggle } from "./Dialog.ptsx"`): part modules wire
     /// to the family's store through DOM ancestry, so their bindings are
@@ -904,6 +991,10 @@ const Generator = struct {
             try w.print("const {s} = @import(\"{s}.zig\");\n", .{ name, name });
         }
 
+        if (gen.request_used) {
+            try w.writeAll("const Request = @import(\"request\").Request;\n");
+        }
+
         try w.writeAll("\n");
         try w.writeAll(gen.module.prop_types);
         try w.writeAll(gen.asserted_types.items);
@@ -915,6 +1006,9 @@ const Generator = struct {
             \\    publr_show: ?bool = null,
             \\    publr_show_wire: ?[]const u8 = null,
             \\    publr_text_wire: ?[]const u8 = null,
+            \\    // The request a server render reads as `Publr.request`, handed down
+            \\    // through every component call.
+            \\    publr_request: ?*const anyopaque = null,
             \\
         );
         for (gen.module.props) |prop| {
@@ -923,6 +1017,9 @@ const Generator = struct {
             }
         }
         try w.writeAll("};\n\n");
+        // What the module's root is drawn by, so a consumer can hold its pages to a set
+        // of layouts at compile time; empty when the root is markup.
+        try w.print("pub const root_component: []const u8 = \"{s}\";\n\n", .{root_component_of(gen.module.root)});
         try w.writeAll("pub fn render(w: *std.Io.Writer, arena: std.mem.Allocator, props: Props) !void {\n    @setFloatMode(.strict);\n");
 
         if (!gen.arena_used) {
@@ -1133,27 +1230,7 @@ const Generator = struct {
                     name,
                 });
             },
-            .string, .number, .enumeration => {
-                if (lowered.type.is_optional()) {
-                    const binding = try gen.fresh("value");
-                    try gen.line("if ({s}) |{s}| {{", .{ lowered.code, binding });
-                    gen.indent += 1;
-                    try gen.static(" ");
-                    try gen.static(name);
-                    try gen.static("=\"");
-                    try gen.write_value(.{ .code = binding, .type = lowered.type.unwrapped() });
-                    try gen.static("\"");
-                    try gen.flush();
-                    gen.indent -= 1;
-                    try gen.line("}}", .{});
-                } else {
-                    try gen.static(" ");
-                    try gen.static(name);
-                    try gen.static("=\"");
-                    try gen.write_value(lowered);
-                    try gen.static("\"");
-                }
-            },
+            .string, .number, .enumeration => try gen.value_attribute(name, lowered),
             else => return gen.fail("an SSR attribute \"{s}\" of type {s} is not lowered", .{ name, @tagName(lowered.type) }),
         }
     }
@@ -1611,7 +1688,7 @@ const Generator = struct {
             if (html.type != .string and html.type != .node) return gen.fail("innerHTML must be a string or rendered node", .{});
             if (html.type == .node) {
                 gen.arena_used = true;
-                try gen.line("try {s}.render({s}, arena);", .{ html.code, gen.writer_name });
+                try gen.render_node(html.code);
             } else {
                 try gen.line("try {s}.writeAll({s});", .{ gen.writer_name, html.code });
             }
@@ -1878,10 +1955,18 @@ const Generator = struct {
         }
 
         if (a.form == .literal) {
+            const text = try gen.literal_text(a.value);
+
             try gen.static(" ");
             try gen.static(name);
             try gen.static("=\"");
-            try gen.static_escaped(try gen.literal_text(a.value), true);
+            if (is_url_attribute(name) and root_path(text)) {
+                if (try gen.url_base_code()) |base| {
+                    try gen.flush();
+                    try gen.line("try rt.write_url_base({s}, {s});", .{ gen.writer_name, base });
+                }
+            }
+            try gen.static_escaped(text, true);
             try gen.static("\"");
             return;
         }
@@ -1924,33 +2009,94 @@ const Generator = struct {
                     name,
                 });
             },
-            .string, .number, .enumeration => {
-                if (lowered.type.is_optional()) {
-                    const binding = try gen.fresh("value");
-                    try gen.line("if ({s}) |{s}| {{", .{ lowered.code, binding });
-                    gen.indent += 1;
-                    try gen.static(" ");
-                    try gen.static(name);
-                    try gen.static("=\"");
-                    try gen.write_value(.{ .code = binding, .type = lowered.type.unwrapped() });
-                    try gen.static("\"");
-                    try gen.flush();
-                    gen.indent -= 1;
-                    try gen.line("}}", .{});
-                } else {
-                    try gen.static(" ");
-                    try gen.static(name);
-                    try gen.static("=\"");
-                    try gen.write_value(lowered);
-                    try gen.static("\"");
-                }
-            },
+            .string, .number, .enumeration => try gen.value_attribute(name, lowered),
             .null => {},
             else => return gen.fail("attribute \"{s}\" has a value of type {s}, which is not lowered", .{
                 name,
                 @tagName(lowered.type),
             }),
         }
+    }
+
+    /// A string, number or enum attribute, an optional one only when present. A URL
+    /// attribute's root path goes under the base the project is served at
+    /// (`rt.url_base`, set by the host), unless it carries it already.
+    fn value_attribute(gen: *Generator, name: []const u8, lowered: Lowered) Error!void {
+        const url = is_url_attribute(name) and lowered.type.unwrapped() == .string;
+
+        if (lowered.type.is_optional()) {
+            const binding = try gen.fresh("value");
+            try gen.line("if ({s}) |{s}| {{", .{ lowered.code, binding });
+            gen.indent += 1;
+            try gen.static(" ");
+            try gen.static(name);
+            try gen.static("=\"");
+            if (url) try gen.url_base_for(binding);
+            try gen.write_value(.{ .code = binding, .type = lowered.type.unwrapped() });
+            try gen.static("\"");
+            try gen.flush();
+            gen.indent -= 1;
+            try gen.line("}}", .{});
+            return;
+        }
+
+        try gen.static(" ");
+        try gen.static(name);
+        try gen.static("=\"");
+        if (url) {
+            const binding = try gen.fresh("url");
+            try gen.flush();
+            try gen.line("const {s} = {s};", .{ binding, lowered.code });
+            try gen.url_base_for(binding);
+            try gen.write_value(.{ .code = binding, .type = lowered.type });
+        } else {
+            try gen.write_value(lowered);
+        }
+        try gen.static("\"");
+    }
+
+    /// A node written where it stands, handed the request this render holds.
+    fn render_node(gen: *Generator, code: []const u8) Error!void {
+        gen.props_used = true;
+        try gen.line("try {s}.render_with({s}, arena, props.publr_request);", .{ code, gen.writer_name });
+    }
+
+    fn url_base_for(gen: *Generator, code: []const u8) Error!void {
+        const base = try gen.url_base_code() orelse return;
+
+        try gen.flush();
+        try gen.line("try rt.write_url_base_for({s}, {s}, {s});", .{ gen.writer_name, base, code });
+    }
+
+    /// The base path out of the render's request (`Program.url_base`), empty in a render
+    /// handed none; null when the program names no base.
+    fn url_base_code(gen: *Generator) Error!?[]const u8 {
+        if (gen.url_base.len == 0) return null;
+
+        var fields = gen.request;
+        var path = std.mem.splitScalar(u8, gen.url_base, '.');
+
+        while (path.next()) |segment| {
+            const field = find_field(fields, segment) orelse {
+                return gen.fail("the URL base \"{s}\" is not a field of the request", .{gen.url_base});
+            };
+            switch (field.type) {
+                .item => |inner| fields = inner,
+                .string => if (path.peek() != null) {
+                    return gen.fail("the URL base \"{s}\" is not a field of the request", .{gen.url_base});
+                },
+                else => return gen.fail("the URL base \"{s}\" is not a string", .{gen.url_base}),
+            }
+        }
+
+        gen.request_used = true;
+        gen.props_used = true;
+
+        return try std.fmt.allocPrint(
+            gen.arena,
+            "(if (props.publr_request) |publr_base_request| @as(*const Request, @ptrCast(@alignCast(publr_base_request))).{s} else \"\")",
+            .{gen.url_base},
+        );
     }
 
     fn literal_text(gen: *Generator, value: *const ExpressionIR) Error![]const u8 {
@@ -2094,6 +2240,27 @@ const Generator = struct {
                 continue;
             };
 
+            // Markup for a node prop (`actions={<Button/>}`, `empty={none && <Empty/>}`):
+            // a block node the callee renders where it reaches it, absent when guarded off.
+            if (form == .expression and (target.type == .node or target.type == .opt_node) and contains_jsx(value)) {
+                const markup = try gen.node_value(value);
+                if (target.type == .node and markup.type != .node) {
+                    return gen.fail("<{s}>'s \"{s}\" is required markup; a guard may leave it out", .{ name, attribute_name });
+                }
+                try fields.writer.print(" .{f} = {s},", .{ std.zig.fmtId(attribute_name), markup.code });
+                continue;
+            }
+
+            // A literal list of objects fills an array prop: the callee's item type
+            // gives each field its type (`parents={[{ label: "Structure", href }]}`).
+            if (form == .expression and target.type == .array and value.* == .array and value.array.items.len > 0) {
+                try fields.writer.print(" .{f} = {s},", .{
+                    std.zig.fmtId(attribute_name),
+                    try gen.object_list(name, target, value.array.items),
+                });
+                continue;
+            }
+
             // A style object fills a string-typed style prop as its CSS text.
             if (form == .expression and std.mem.eql(u8, attribute_name, "style") and value.* == .object) {
                 try fields.writer.print(" .{f} = {s},", .{
@@ -2184,6 +2351,10 @@ const Generator = struct {
             try fields.writer.print(" .{f} = {s},", .{ std.zig.fmtId(attribute_name), code });
         }
 
+        // Every call hands the request down, so any component may read it.
+        gen.props_used = true;
+        try fields.writer.writeAll(" .publr_request = props.publr_request,");
+
         // A component-call root passes the transport through.
         if (gen.at_root) {
             gen.at_root = false;
@@ -2219,6 +2390,97 @@ const Generator = struct {
         }
 
         try gen.component_call(name, callee, fields.written(), n);
+    }
+
+    /// A node prop's value: markup becomes a block over the props and locals in scope, as a
+    /// component's children do; `a && <X/>`, `a ? <X/> : <Y/>` and `a || b` choose between
+    /// blocks, and an arm that renders nothing is null, so the callee sees it absent.
+    fn node_value(gen: *Generator, e: *const ExpressionIR) Error!Lowered {
+        switch (e.*) {
+            .node => |node_expr| {
+                const capture = try gen.fresh("markup");
+                const body_type = try capitalize(gen.arena, capture);
+
+                try gen.block_struct(body_type, &.{node_expr.node});
+
+                var captured: std.Io.Writer.Allocating = .init(gen.arena);
+                try captured.writer.writeAll(" .props = &props,");
+                for (gen.locals.items) |local| {
+                    try captured.writer.print(" .{s} = &{s},", .{ local.name, local.name });
+                }
+                gen.props_used = true;
+                try gen.line("const {s} = .{{{s} }};", .{ capture, captured.written() });
+                return .{ .code = try std.fmt.allocPrint(gen.arena, "rt.block(&{s}, {s})", .{ capture, body_type }), .type = .node };
+            },
+            .conditional => |conditional| {
+                const test_code = try gen.truthy(try gen.expression(conditional.@"test"));
+                const consequent = try gen.optional_markup(conditional.consequent);
+                const alternate = try gen.optional_markup(conditional.alternate);
+                return .{
+                    .code = try std.fmt.allocPrint(gen.arena, "(if ({s}) {s} else {s})", .{ test_code, consequent, alternate }),
+                    .type = .opt_node,
+                };
+            },
+            .operation => |operation_ir| {
+                if (std.mem.eql(u8, operation_ir.operator, "&&")) {
+                    const test_code = try gen.truthy(try gen.expression(operation_ir.left));
+                    const markup = try gen.optional_markup(operation_ir.right);
+                    return .{
+                        .code = try std.fmt.allocPrint(gen.arena, "(if ({s}) {s} else null)", .{ test_code, markup }),
+                        .type = .opt_node,
+                    };
+                }
+                if (std.mem.eql(u8, operation_ir.operator, "||")) {
+                    const left = try gen.optional_markup(operation_ir.left);
+                    const right = try gen.optional_markup(operation_ir.right);
+                    return .{ .code = try std.fmt.allocPrint(gen.arena, "({s} orelse {s})", .{ left, right }), .type = .opt_node };
+                }
+                return gen.fail("markup combined with \"{s}\" is not lowered", .{operation_ir.operator});
+            },
+            else => {
+                const lowered = try gen.expression(e);
+                return switch (lowered.type) {
+                    .node, .opt_node => lowered,
+                    .null => .{ .code = "null", .type = .opt_node },
+                    else => gen.fail("a {s} where markup goes", .{@tagName(lowered.type)}),
+                };
+            },
+        }
+    }
+
+    /// `node_value` as a `?rt.Node`, `null` for an arm that renders nothing.
+    fn optional_markup(gen: *Generator, e: *const ExpressionIR) Error![]const u8 {
+        if (is_null_literal(e) or e.* == .absent or (e.* == .literal and e.literal == .boolean)) {
+            return "@as(?rt.Node, null)";
+        }
+        const markup = try gen.node_value(e);
+        return std.fmt.allocPrint(gen.arena, "@as(?rt.Node, {s})", .{markup.code});
+    }
+
+    /// `&[_]Callee.ParentsItem{ .{ .label = "Structure", .href = … }, … }`: an array
+    /// literal of object literals for an array prop, each field coerced to the item's type.
+    fn object_list(gen: *Generator, callee: []const u8, target: Field, items: []const *const ExpressionIR) Error![]const u8 {
+        const prefix = "[]const ";
+        if (!std.mem.startsWith(u8, target.zig_type, prefix)) {
+            return gen.fail("\"{s}\" takes no list of objects", .{target.name});
+        }
+        const item_type = target.zig_type[prefix.len..];
+        var out: std.Io.Writer.Allocating = .init(gen.arena);
+        try out.writer.print("&[_]{s}.{s}{{", .{ callee, item_type });
+        for (items) |item| {
+            if (item.* != .object) return gen.fail("a list for \"{s}\" holds only object literals", .{target.name});
+            try out.writer.writeAll(" .{");
+            for (item.object.fields) |object_field| {
+                const field = find_field(target.type.array, object_field.name) orelse {
+                    return gen.fail("\"{s}\" items have no field \"{s}\"", .{ target.name, object_field.name });
+                };
+                const lowered = try gen.expression(object_field.value);
+                try out.writer.print(" .{f} = {s},", .{ std.zig.fmtId(object_field.name), try gen.coerce(lowered, field.type) });
+            }
+            try out.writer.writeAll(" },");
+        }
+        try out.writer.writeAll(" }");
+        return out.written();
     }
 
     /// The render call for a resolved component: children become a block node
@@ -3096,7 +3358,7 @@ const Generator = struct {
             try gen.static(">");
             if (!anchor_only) {
                 gen.template_depth += 1;
-                try gen.child_expression(body);
+                try gen.row_body(body);
                 gen.template_depth -= 1;
             }
             try gen.static("</template>");
@@ -3173,6 +3435,16 @@ const Generator = struct {
         try gen.line("}}", .{});
     }
 
+    /// A row's body, which carries the row's store and key, so it is one element: a body
+    /// that is an expression (`item.primary && <form/>`) lands in a wrapper, or the row's
+    /// store would sit on the branch's anchor and the branch's content would not see the item.
+    fn row_body(gen: *Generator, body: *const ExpressionIR) Error!void {
+        const wrapper = body.* != .node;
+        if (wrapper) try gen.static("<span class=\"contents\">");
+        try gen.child_expression(body);
+        if (wrapper) try gen.static("</span>");
+    }
+
     fn branch_body(gen: *Generator, body: *const ExpressionIR) Error!void {
         const wrapper = body.* != .node or body.node.node.* != .element;
         if (wrapper) try gen.static("<span class=\"contents\">");
@@ -3209,7 +3481,7 @@ const Generator = struct {
         try gen.line("var {s} = rt.RootAttributeWriter.init({s}, \"data-p-for-key\", {s});", .{ marker, outer, key });
         gen.writer_name = try std.fmt.allocPrint(gen.arena, "(&{s}.writer)", .{marker});
         gen.seeded_depth += 1;
-        try gen.child_expression(function.body);
+        try gen.row_body(function.body);
         gen.seeded_depth -= 1;
         try gen.flush();
         gen.writer_name = outer;
@@ -3242,7 +3514,7 @@ const Generator = struct {
             .string => try gen.line("try rt.escape({s}, {s});", .{ gen.writer_name, lowered.code }),
             .node => {
                 gen.arena_used = true;
-                try gen.line("try {s}.render({s}, arena);", .{ lowered.code, gen.writer_name });
+                try gen.render_node(lowered.code);
             },
             .number => try gen.line("try rt.write_number({s}, {s});", .{ gen.writer_name, lowered.code }),
             .boolean => try gen.line("try {s}.writeAll(if ({s}) \"true\" else \"false\");", .{ gen.writer_name, lowered.code }),
@@ -4106,6 +4378,9 @@ const Generator = struct {
             .absent => return .{ .code = "null", .type = .null },
             .reference => |reference_ir| return gen.reference(reference_ir.name, reference_ir.source),
             .member => |member| {
+                if (is_publr_request(member)) {
+                    return gen.request_root();
+                }
                 const object = try gen.expression(member.object);
 
                 if (member.property != .string) {
@@ -4266,6 +4541,21 @@ const Generator = struct {
         };
     }
 
+    /// `Publr.request`: the request the render was handed, as an item of the declared
+    /// fields. A render handed none fails at the read.
+    fn request_root(gen: *Generator) Error!Lowered {
+        if (gen.request.len == 0) {
+            return gen.fail("Publr.request is read, but the program declares no request", .{});
+        }
+        gen.request_used = true;
+        gen.props_used = true;
+        return .{
+            .code = "@as(*const Request, @ptrCast(@alignCast(props.publr_request orelse " ++
+                "@panic(\"Publr.request read in a render handed no request\")))).*",
+            .type = .{ .item = gen.request },
+        };
+    }
+
     fn reference(gen: *Generator, name: []const u8, source: compiler.ReferenceSource) Error!Lowered {
         switch (source) {
             .prop => {
@@ -4379,6 +4669,19 @@ const Generator = struct {
             const label = try gen.fresh("select");
             const saved = Lowered{ .code = binding, .type = left.type };
             const is_and = std.mem.eql(u8, operator, "&&");
+            const right_is_node = right.type == .node or right.type == .opt_node;
+            const left_is_node = left.type == .node or left.type == .opt_node;
+
+            // `flag && node`: markup when the guard holds, nothing otherwise, as JSX
+            // renders a false child as nothing.
+            if (is_and and right_is_node and !left_is_node) {
+                const nothing = Lowered{ .code = "null", .type = .null };
+                const guarded = try gen.select(try gen.truthy(saved), right, nothing);
+                return .{
+                    .code = try std.fmt.allocPrint(gen.arena, "{s}: {{ const {s} = {s}; break :{s} {s}; }}", .{ label, binding, left.code, label, guarded.code }),
+                    .type = guarded.type,
+                };
+            }
             const selected = try gen.select(try gen.truthy(saved), if (is_and) right else saved, if (is_and) saved else right);
             return .{
                 .code = try std.fmt.allocPrint(gen.arena, "{s}: {{ const {s} = {s}; break :{s} {s}; }}", .{ label, binding, left.code, label, selected.code }),
@@ -4533,6 +4836,8 @@ const Generator = struct {
                 .boolean => .opt_boolean,
                 .node => .opt_node,
                 .enumeration => |e| .{ .opt_enumeration = e },
+                // Already optional (a prop that may be absent): null is one of its values.
+                .opt_string, .opt_number, .opt_boolean, .opt_node, .opt_enumeration => present.type,
                 else => return gen.fail("a conditional mixes null with a {s}", .{@tagName(present.type)}),
             };
             const optional_code = switch (optional) {
@@ -4928,12 +5233,12 @@ test "a small module lowers: props struct, escaped text, loop, conditional, comp
     try std.testing.expect(std.mem.indexOf(u8, source, "for (props.posts) |post| {") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, "allocPrint(arena, \"/post/{s}\", .{ post.slug, })") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, "try rt.escape(w, post.slug);") != null);
-    try std.testing.expect(std.mem.indexOf(u8, source, "try Layout.render(w, arena, .{ .title = \"Hi\", .publr_show = props.publr_show, .publr_show_wire = props.publr_show_wire, .publr_text_wire = props.publr_text_wire, .children = rt.block(&children_1, Children_1) });") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "try Layout.render(w, arena, .{ .title = \"Hi\", .publr_request = props.publr_request, .publr_show = props.publr_show, .publr_show_wire = props.publr_show_wire, .publr_text_wire = props.publr_text_wire, .children = rt.block(&children_1, Children_1) });") != null);
 
     const layout_source = try test_lower(arena, &sources, "Layout");
     try std.testing.expect(std.mem.indexOf(u8, layout_source, "children: ?rt.Node = null,") != null);
     try std.testing.expect(std.mem.indexOf(u8, layout_source, "try rt.escape(w, props.title);") != null);
-    try std.testing.expect(std.mem.indexOf(u8, layout_source, "try value_1.render(w, arena);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, layout_source, "try value_1.render_with(w, arena, props.publr_request);") != null);
 }
 
 test "an unsupported construct fails with a message naming the module and construct" {

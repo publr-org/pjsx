@@ -173,7 +173,8 @@ const Generator = struct {
             // Mutations are idle during server rendering; never evaluate their callback.
             const code = if (kind != null and util.eql(kind.?, "mutation"))
                 "try rt.object(arena, &.{\"isPending\", \"isError\", \"error\", \"value\"}, &.{V{ .bool = false }, V{ .bool = false }, V.null, V.null})"
-            else try g.emitExpression(value);
+            else
+                try g.emitExpression(value);
             if (kind != null and util.eql(kind.?, "awaited") and std.mem.startsWith(u8, code, "try rt.native(")) {
                 const resolved = try g.fresh();
                 try g.write("const {s} = try rt.nativeResult{s};\nconst {s}: V = {s}.value; _ = &{s};\n", .{ resolved, code["try rt.native".len..], local, resolved, local });

@@ -386,9 +386,9 @@ test "hidden on component calls rides the show transport with inverted polarity"
     try expectMatch(dom_out, "show\\(\\$\\$dom\\.component\\(Icon,", "");
     try expectMatch(dom_out, "!!active", "");
     try expectMatch(dom_out, "!\\(active \\|\\| muted\\)", "");
-    try expectContains(zig_out, "try Icon.render(w, arena, .{ .publr_show = !!props.active, });");
-    try expectContains(zig_out, "try Icon.render(w, arena, .{ .publr_show = !props.active, });");
-    try expectContains(zig_out, "try Icon.render(w, arena, .{ .publr_show = !(props.active or props.muted), });");
+    try expectContains(zig_out, "try Icon.render(w, arena, .{ .publr_show = !!props.active, .publr_request = props.publr_request, });");
+    try expectContains(zig_out, "try Icon.render(w, arena, .{ .publr_show = !props.active, .publr_request = props.publr_request, });");
+    try expectContains(zig_out, "try Icon.render(w, arena, .{ .publr_show = !(props.active or props.muted), .publr_request = props.publr_request, });");
 }
 
 test "conditional mounting is not exposed as a Publr directive" {
@@ -956,8 +956,8 @@ test "compound anatomy sharing the parent prefix remains rendered children" {
     }, "Demo");
     const dom_out = try domCode(arena.a(), demo_source, "Demo.ptsx");
 
-    try expectContains(zig_out, "try UnitControlInput.render(w, arena, .{ .value = @as(f64, 0), });");
-    try expectContains(zig_out, "try UnitControlUnit.render(w, arena, .{ .value = \"px\", });");
+    try expectContains(zig_out, "try UnitControlInput.render(w, arena, .{ .value = @as(f64, 0), .publr_request = props.publr_request, });");
+    try expectContains(zig_out, "try UnitControlUnit.render(w, arena, .{ .value = \"px\", .publr_request = props.publr_request, });");
     try expectNotContains(zig_out, "inputValue");
     try expectNotContains(zig_out, "unitValue");
     try expectMatch(dom_out, "component\\(UnitControlInput, \\{ value: 0 \\}\\)", "");
@@ -998,7 +998,7 @@ test "nullish coalescing preserves JavaScript semantics and lowers to Zig option
     try expectContains(zig_out, "children: ?rt.Node = null,");
     try expectContains(zig_out, "try rt.escape(w, (props.title orelse \"Untitled\"));");
     try expectContains(zig_out, "if ((props.hidden orelse false)) try w.writeAll(\" hidden\");");
-    try expectContains(zig_out, "try (props.children orelse props.fallback).render(w, arena);");
+    try expectContains(zig_out, "try (props.children orelse props.fallback).render_with(w, arena, props.publr_request);");
 }
 
 test "optional node children can fall back to declarative JSX" {
@@ -1032,7 +1032,7 @@ test "optional node children can fall back to declarative JSX" {
 
     try expectContains(zig_out, "if (props.children) |present_1| {");
     try expectContains(zig_out, "try rt.escape(w, props.label);");
-    try expectContains(zig_out, "try Text.render(w, arena, .{ .variant = .@\"body-md\", .children = rt.block(&children_2, Children_2) });");
+    try expectContains(zig_out, "try Text.render(w, arena, .{ .variant = .@\"body-md\", .publr_request = props.publr_request, .children = rt.block(&children_2, Children_2) });");
 }
 
 test "conditionals with undefined lower to optional Zig attributes" {

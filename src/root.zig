@@ -172,6 +172,7 @@ pub const targets = struct {
     };
     pub const zig = struct {
         pub const lowerPjsxToZig = targets_zig_module.lowerPjsxToZig;
+        pub const requestFields = targets_zig_module.requestFields;
         pub const Program = targets_zig_module.Program;
         pub const ZigOutput = targets_zig_module.ZigOutput;
     };
