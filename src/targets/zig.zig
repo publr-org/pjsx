@@ -469,9 +469,6 @@ fn adapt_module(arena: std.mem.Allocator, ir: *const compiler.ModuleIR) Error!Mo
         string_constants[i] = .{ .key = constant.name, .value = constant.value };
     }
 
-    var prop_types: std.Io.Writer.Allocating = .init(arena);
-    const props = try adapt_props(arena, component.props, &prop_types.writer, component.name);
-
     var imports: std.ArrayList(Module.Import) = .empty;
     for (component.imports) |import| {
         for (import.names) |entry| {
@@ -483,6 +480,13 @@ fn adapt_module(arena: std.mem.Allocator, ir: *const compiler.ModuleIR) Error!Mo
             });
         }
     }
+
+    var prop_types: std.Io.Writer.Allocating = .init(arena);
+    // The module's imports are declarations too: a prop's type never takes their names (an
+    // `icon` prop beside an imported `Icon`).
+    var type_names: TypeNames = .empty;
+    for (imports.items) |import| try type_names.put(arena, import.local, {});
+    const props = try adapt_props(arena, component.props, &prop_types.writer, component.name, &type_names);
 
     return .{
         .name = component.name,
@@ -543,11 +547,31 @@ fn module_name_of(source: []const u8) []const u8 {
 
 /// The prop schema as typed fields, writing the nested struct and enum
 /// declarations to `types` as it goes.
+/// The item struct names a module declares so far: an array prop's items are named after
+/// it (`changes` → `ChangesItem`), and a name already taken by another array of the same
+/// name elsewhere in the props takes its parent's name in front (`OursSegmentsItem`).
+const TypeNames = std.StringHashMapUnmanaged(void);
+
+fn item_struct_name(arena: std.mem.Allocator, names: *TypeNames, where: []const u8, name: []const u8) Error![]const u8 {
+    const plain = try std.fmt.allocPrint(arena, "{s}Item", .{try capitalize(arena, name)});
+    const taken = names.contains(plain);
+    const parent = where[if (std.mem.lastIndexOfScalar(u8, where, '.')) |dot| dot + 1 else 0..];
+    const chosen = if (!taken)
+        plain
+    else
+        try std.fmt.allocPrint(arena, "{s}{s}", .{ try capitalize(arena, parent), plain });
+
+    if (names.contains(chosen)) return err.fail("{s}.{s}: item type name {s} is taken twice", .{ where, name, chosen });
+    try names.put(arena, chosen, {});
+    return chosen;
+}
+
 fn adapt_props(
     arena: std.mem.Allocator,
     schema: *const analyze.Schema,
     types: *std.Io.Writer,
     where: []const u8,
+    names: *TypeNames,
 ) Error![]const Field {
     var fields: std.ArrayList(Field) = .empty;
 
@@ -575,10 +599,18 @@ fn adapt_props(
         const enumerable = spec.type == .string or spec.type == .element;
 
         if (enumerable and spec.values != null) {
-            const enum_name = if (std.mem.lastIndexOfScalar(u8, where, '.')) |dot|
+            const plain_name = if (std.mem.lastIndexOfScalar(u8, where, '.')) |dot|
                 try std.fmt.allocPrint(arena, "{s}{s}", .{ try capitalize(arena, where[dot + 1 ..]), try capitalize(arena, name) })
             else
                 try capitalize(arena, name);
+            // A name the module already declares (an import) takes `Value` after it.
+            const enum_name = if (names.contains(plain_name))
+                try std.fmt.allocPrint(arena, "{s}Value", .{plain_name})
+            else
+                plain_name;
+
+            if (names.contains(enum_name)) return err.fail("{s}.{s}: enum type name {s} is taken twice", .{ where, name, enum_name });
+            try names.put(arena, enum_name, {});
             var tags: std.ArrayList([]const u8) = .empty;
 
             try types.print("pub const {s} = enum {{", .{enum_name});
@@ -687,9 +719,9 @@ fn adapt_props(
             .array => {
                 if (empty_array_default) default_code = "&.{}";
                 if (spec.fields) |nested| {
-                    const struct_name = try std.fmt.allocPrint(arena, "{s}Item", .{try capitalize(arena, name)});
+                    const struct_name = try item_struct_name(arena, names, where, name);
                     var nested_types: std.Io.Writer.Allocating = .init(arena);
-                    const item_fields = try adapt_props(arena, nested, &nested_types.writer, try std.fmt.allocPrint(arena, "{s}.{s}", .{ where, name }));
+                    const item_fields = try adapt_props(arena, nested, &nested_types.writer, try std.fmt.allocPrint(arena, "{s}.{s}", .{ where, name }), names);
 
                     try types.writeAll(nested_types.written());
                     try types.print("pub const {s} = struct {{\n", .{struct_name});
@@ -1536,6 +1568,8 @@ const Generator = struct {
                     try gen.static("&quot;:");
                     switch (lowered.type) {
                         .string => try gen.line("try rt.write_seed_string({s}, {s});", .{ gen.writer_name, lowered.code }),
+                        // A closed string set seeds as its tag: the browser reads the same string.
+                        .enumeration => try gen.line("try rt.write_seed_string({s}, @tagName({s}));", .{ gen.writer_name, lowered.code }),
                         .boolean => try gen.line("try {s}.writeAll(if ({s}) \"true\" else \"false\");", .{ gen.writer_name, lowered.code }),
                         .number => try gen.line("try rt.write_number({s}, {s});", .{ gen.writer_name, lowered.code }),
                         .null => try gen.static("null"),
@@ -4519,7 +4553,8 @@ const Generator = struct {
         const name = try gen.fresh("asserted");
         try schema.put(name, spec.*);
         var types: std.Io.Writer.Allocating = .init(gen.arena);
-        const fields = try adapt_props(gen.arena, &schema, &types.writer, gen.module.name);
+        var type_names: TypeNames = .empty;
+        const fields = try adapt_props(gen.arena, &schema, &types.writer, gen.module.name, &type_names);
         try gen.asserted_types.appendSlice(gen.arena, types.written());
         const lowered: Lowered = .{
             .code = try std.fmt.allocPrint(gen.arena, "@as({s}, &.{{}})", .{fields[0].zig_type}),

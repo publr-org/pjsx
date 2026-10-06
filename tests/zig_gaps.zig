@@ -816,3 +816,51 @@ test "closed gap: a module names the component its root is drawn by" {
     }, "Page");
     try expectMatch(code, "pub const root_component: \\[\\]const u8 = \"Frame\";", "");
 }
+
+test "closed gap: two lists with a list of the same name each get their own item type" {
+    // The merge resolver: `theirs` and `ours`, each value with its `segments`.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const code = try lowers(arena.allocator(), "Sides",
+        \\type Value = { text: string; segments: Array<{ text: string; mark: string }> };
+        \\export function Sides({ theirs, ours }: { theirs: Array<Value>; ours: Array<Value> }) {
+        \\  return <div>{theirs.length}{ours.length}</div>;
+        \\}
+    );
+    try expectMatch(code, "pub const SegmentsItem = struct", "");
+    try expectMatch(code, "pub const OursSegmentsItem = struct", "");
+}
+
+test "closed gap: a prop's enum type never takes an imported component's name" {
+    // The merge's field card: an `icon` prop beside the imported `Icon`.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const code = try compile(arena.allocator(), &.{
+        .{ "Icon.ptsx",
+        \\export function Icon({ name }: { name: "plus" | "link" }) { return <svg data-name={name} />; }
+        },
+        .{ "Card.ptsx",
+        \\import { Icon } from "./Icon.ptsx";
+        \\export function Card({ icon }: { icon: "plus" | "link" }) { return <Icon name={icon} />; }
+        },
+    }, "Card");
+    try expectMatch(code, "pub const IconValue = enum", "");
+    try expectMatch(code, "const Icon = @import\\(\"Icon.zig\"\\);", "");
+}
+
+test "closed gap: a family seeds its state from a closed string set prop" {
+    // publr's media library: the tile size arrives as `"sm" | "md" | "lg"` and seeds the
+    // state the grid's `size` reads.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const out = try lowers(arena.allocator(), "Tiles",
+        \\import { Publr } from "publr-jsx";
+        \\export const state = Publr.reactive({ size: "md" as "sm" | "md" | "lg" });
+        \\export type TilesProps = { size?: "sm" | "md" | "lg" };
+        \\export function Tiles({ size = "md" }: TilesProps) {
+        \\  state.size = size;
+        \\  return <div data-size={state.size} />;
+        \\}
+    );
+    try expectMatch(out, "write_seed_string\\(w, @tagName\\(", "");
+}
