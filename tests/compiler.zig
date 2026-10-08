@@ -1365,6 +1365,75 @@ test "a reactive numeric field wires through an SSR + wire attribute pair" {
     try expectContains(zig_out, " data-p-bind=\\\"value:$value\\\">");
 }
 
+test "a prop's ternary on a plain prop hands the callee the arm the server picks, with its wire" {
+    var arena = Arena.init();
+    defer arena.deinit();
+    const zig_out = try zigCodeSet(arena.a(), &.{
+        .{
+            "Badge.ptsx",
+            \\export type BadgeProps = { label: string };
+            \\export function Badge({ label }: BadgeProps) {
+            \\  return <span>{label}</span>;
+            \\}
+        },
+        .{
+            "Strip.ptsx",
+            \\import { Publr } from "publr/dom";
+            \\import { Badge } from "./Badge.ptsx";
+            \\export type StripProps = { is_new: boolean; label: string };
+            \\export const state = Publr.reactive({ label: "" });
+            \\export function Strip({ is_new, label }: StripProps) {
+            \\  state.label = label;
+            \\  return <div><Badge label={is_new ? "New" : state.label} /></div>;
+            \\}
+        },
+    }, "Strip");
+
+    try expectContains(zig_out, ".label = (if (props.is_new) \"New\" else props.label)");
+    try expectContains(zig_out, ".publr_bind_label = (if (props.is_new) @as(?[]const u8, null) else @as(?[]const u8, \"$label\"))");
+}
+
+test "an optional string guard is false when empty, as in JavaScript" {
+    var arena = Arena.init();
+    defer arena.deinit();
+    const header_source =
+        \\
+        \\export type HeaderProps = { description?: string };
+        \\
+        \\export function Header({ description }: HeaderProps) {
+        \\  return <div>{description && <p>{description}</p>}</div>;
+        \\}
+        \\
+    ;
+    const zig_out = try zigCode(arena.a(), header_source, "header.ptsx");
+
+    try expectContains(zig_out, "|value| value.len != 0 else false");
+    try expectNotContains(zig_out, "if ((props.description != null))");
+}
+
+test "a conditional over own state whose branch also reads own state renders its initial" {
+    var arena = Arena.init();
+    defer arena.deinit();
+    const sized_source =
+        \\
+        \\import { Publr } from "publr/dom";
+        \\
+        \\export const sizedProps = {
+        \\  initial: { type: "number" },
+        \\};
+        \\
+        \\export function Sized({ initial }) {
+        \\  const state = Publr.reactive({ height: initial });
+        \\  return <div style={state.height > 0 ? `height:${state.height}px` : ""} />;
+        \\}
+        \\
+    ;
+    const zig_out = try zigCode(arena.a(), sized_source, "sized.ptsx");
+
+    try expectContains(zig_out, "if ((props.initial > @as(f64, 0)))");
+    try expectContains(zig_out, "style:$height &gt; 0 -&gt; ('height:' + $height + 'px') ~ ''");
+}
+
 test "component calls pass typed booleans and forward renamed action props by name" {
     var arena = Arena.init();
     defer arena.deinit();

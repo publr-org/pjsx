@@ -129,6 +129,9 @@ const Field = struct {
     /// Scalar props carry a `publr_bind_<name>` wire alongside their value,
     /// so a caller's reactive binding crosses the component boundary.
     bind_transport: bool = false,
+    /// List props carry one too: a caller's reactive list crosses the boundary, and the
+    /// callee's `.map` over it draws a reactive list bound to the caller's state.
+    list_transport: bool = false,
 };
 
 /// One module of the compile set, adapted from the typed IR into the shapes
@@ -752,6 +755,7 @@ fn adapt_props(
                 .string, .opt_string, .boolean, .opt_boolean, .number, .opt_number, .enumeration, .opt_enumeration => true,
                 else => false,
             },
+            .list_transport = prop_type == .array or prop_type == .strings,
         });
     }
 
@@ -1044,7 +1048,7 @@ const Generator = struct {
             \\
         );
         for (gen.module.props) |prop| {
-            if (prop.bind_transport) {
+            if (prop.bind_transport or prop.list_transport) {
                 try w.print("    publr_bind_{s}: ?[]const u8 = null,\n", .{prop.name});
             }
         }
@@ -1172,6 +1176,19 @@ const Generator = struct {
         return null;
     }
 
+    /// A branch of a conditional over own state: its own initial when it reads own state
+    /// too (`state.on ? `${state.size}px` : ""`), the plain expression otherwise; null
+    /// when it reads state the server cannot serve.
+    fn initial_or_expression(gen: *Generator, e: *const ExpressionIR) Error!?Lowered {
+        if (try gen.own_initial(e)) |initial| {
+            return switch (initial) {
+                .unservable => null,
+                .lowered => |lowered| lowered,
+            };
+        }
+        return try gen.expression(e);
+    }
+
     /// The SSR value behind an own-state wire: the seed expression when the
     /// field is seeded, the initial-state value otherwise; `.unservable` for
     /// getters and other fields the IR could not carry (the wire then
@@ -1199,7 +1216,9 @@ const Generator = struct {
         if (e.* == .conditional) {
             if (try gen.own_initial(e.conditional.@"test")) |test_value| {
                 if (test_value == .unservable) return .unservable;
-                return .{ .lowered = try gen.select(try gen.truthy(test_value.lowered), try gen.expression(e.conditional.consequent), try gen.expression(e.conditional.alternate)) };
+                const consequent = (try gen.initial_or_expression(e.conditional.consequent)) orelse return .unservable;
+                const alternate = (try gen.initial_or_expression(e.conditional.alternate)) orelse return .unservable;
+                return .{ .lowered = try gen.select(try gen.truthy(test_value.lowered), consequent, alternate) };
             }
         }
         // `!state.x` inverts its field's initial.
@@ -2304,20 +2323,34 @@ const Generator = struct {
                 continue;
             }
 
+            // `is_new ? "New" : state.label`: the test is the server's to decide, an arm
+            // reads state. The server picks the arm, and the callee gets its value and, when
+            // the arm is a wire, its wire.
+            if (form == .expression and target.bind_transport and value.* == .conditional) {
+                if (try gen.prop_conditional(value, target)) |chosen| {
+                    try fields.writer.print(" .{f} = {s}, .publr_bind_{s} = {s},", .{ std.zig.fmtId(attribute_name), chosen.value, attribute_name, chosen.wire });
+                    continue;
+                }
+            }
+
             if (form == .expression) {
                 // A reactive binding crosses the boundary as the prop's wire;
                 // a foreign one has no SSR value, so the prop keeps its
                 // default until hydration.
                 if (try gen.wire_spec(value)) |wired| {
-                    if (!target.bind_transport) {
-                        return gen.fail("<{s}>'s \"{s}\" cannot carry a wire (not a scalar prop)", .{ name, attribute_name });
+                    if (!target.bind_transport and !target.list_transport) {
+                        return gen.fail("<{s}>'s \"{s}\" cannot carry a wire (not a scalar or list prop)", .{ name, attribute_name });
                     }
                     if (wired.own) {
                         const state = (try gen.own_initial(value)) orelse {
                             return gen.fail("no SSR value for this module's own state on <{s}>", .{name});
                         };
                         switch (state) {
-                            .lowered => |initial| try fields.writer.print(" .{f} = {s},", .{ std.zig.fmtId(attribute_name), (if (target.type.unwrapped() == .enumeration) try gen.enum_expression(value, target.type) else null) orelse try gen.coerce(initial, target.type) }),
+                            .lowered => |initial| if (target.list_transport) {
+                                // The caller's rows become the callee's row type.
+                                gen.arena_used = true;
+                                try fields.writer.print(" .{f} = try rt.prop_array(@FieldType({s}.Props, \"{s}\"), arena, {s}),", .{ std.zig.fmtId(attribute_name), name, attribute_name, initial.code });
+                            } else try fields.writer.print(" .{f} = {s},", .{ std.zig.fmtId(attribute_name), (if (target.type.unwrapped() == .enumeration) try gen.enum_expression(value, target.type) else null) orelse try gen.coerce(initial, target.type) }),
                             .unservable => {},
                         }
                     }
@@ -2334,6 +2367,7 @@ const Generator = struct {
                             .opt_number => "0",
                             .boolean => if (required) "false" else null,
                             .opt_boolean => "false",
+                            .array, .strings => "&.{}",
                             else => null,
                         };
                         if (placeholder) |code| try fields.writer.print(" .{f} = {s},", .{ std.zig.fmtId(attribute_name), code });
@@ -3178,11 +3212,9 @@ const Generator = struct {
                         try gen.line("}}", .{});
                         return;
                     }
-                    const test_code = switch (left.type) {
-                        .opt_boolean => try std.fmt.allocPrint(gen.arena, "({s} orelse false)", .{left.code}),
-                        .opt_string, .opt_number, .opt_node, .opt_enumeration, .opt_strings, .action => try std.fmt.allocPrint(gen.arena, "({s} != null)", .{left.code}),
-                        else => try gen.truthy(left),
-                    };
+                    // JavaScript truthiness, as the browser half decides it: an empty string,
+                    // zero or a node that draws nothing is false, not only an absent value.
+                    const test_code = try gen.truthy(left);
                     try gen.line("if ({s}) {{", .{test_code});
                     gen.indent += 1;
                     const present_count = gen.present_values.items.len;
@@ -3303,9 +3335,8 @@ const Generator = struct {
         }
         try gen.static("</template>");
 
-        // The server-rendered arm, tested as the plain branch tests it.
-        const presence = unwraps and gen.module.semantics_version == 0;
-        const test_code = if (presence) try std.fmt.allocPrint(gen.arena, "({s} != null)", .{tested.code}) else try gen.truthy(tested);
+        // The server-rendered arm, tested as the plain branch tests it: JavaScript truthiness.
+        const test_code = try gen.truthy(tested);
         try gen.line("if ({s}{s}) {{", .{ if (inverse) @as([]const u8, "!") else "", test_code });
         gen.indent += 1;
         if (unwraps) try gen.present_values.append(gen.arena, tested.code);
@@ -3403,6 +3434,9 @@ const Generator = struct {
             }
             return;
         }
+        if (gen.list_prop(call.callee.member.object)) |prop| {
+            return gen.prop_list_loop(e, prop, function.function);
+        }
         const subject = try gen.expression(call.callee.member.object);
         const item_type: Type = switch (subject.type) {
             .array => |fields| .{ .item = fields },
@@ -3419,6 +3453,164 @@ const Generator = struct {
         _ = gen.locals.pop();
         gen.indent -= 1;
         try gen.line("}}", .{});
+    }
+
+    const ChosenArm = struct { value: []const u8, wire: []const u8 };
+
+    /// A conditional prop whose test is not reactive but one of whose arms is: the value
+    /// and the wire as the server picks them. Null when the test is reactive (a wire
+    /// already) or neither arm is.
+    fn prop_conditional(gen: *Generator, e: *const ExpressionIR, target: Field) Error!?ChosenArm {
+        const conditional = e.conditional;
+        if (try gen.wire_spec(conditional.@"test") != null) return null;
+        const consequent = try gen.wire_spec(conditional.consequent);
+        const alternate = try gen.wire_spec(conditional.alternate);
+        if (consequent == null and alternate == null) return null;
+
+        const tested = try gen.truthy(try gen.expression(conditional.@"test"));
+        const arms = [2]*const ExpressionIR{ conditional.consequent, conditional.alternate };
+        const wires = [2]?Wired{ consequent, alternate };
+        var values: [2][]const u8 = undefined;
+        var specs: [2][]const u8 = undefined;
+        for (arms, wires, 0..) |arm, wired, index| {
+            if (wired) |wire| {
+                const initial = (try gen.own_initial(arm)) orelse return null;
+                if (initial == .unservable) return null;
+                values[index] = try gen.coerce(initial.lowered, target.type);
+                specs[index] = try std.fmt.allocPrint(gen.arena, "@as(?[]const u8, {s})", .{try zig_string(gen.arena, wire.spec)});
+            } else {
+                values[index] = try gen.coerce(try gen.expression(arm), target.type);
+                specs[index] = "@as(?[]const u8, null)";
+            }
+        }
+        return .{
+            .value = try std.fmt.allocPrint(gen.arena, "(if ({s}) {s} else {s})", .{ tested, values[0], values[1] }),
+            .wire = try std.fmt.allocPrint(gen.arena, "(if ({s}) {s} else {s})", .{ tested, specs[0], specs[1] }),
+        };
+    }
+
+    /// The list prop `e` names, when it is one a caller may hand in wired.
+    fn list_prop(gen: *Generator, e: *const ExpressionIR) ?Field {
+        if (e.* != .reference or e.reference.source != .prop) return null;
+        const field = find_field(gen.module.props, e.reference.name) orelse return null;
+        return if (field.list_transport) field else null;
+    }
+
+    /// `items.map(...)` over a list prop: wired by the caller, a reactive list bound to the
+    /// caller's state (its prototype, then the rows the server draws, keyed as the runtime
+    /// keeps them); handed in plain, the rows alone.
+    fn prop_list_loop(gen: *Generator, e: *const ExpressionIR, prop: Field, function: anytype) Error!void {
+        const parameter = function.parameters[0];
+        const capture = try gen.fresh("list_wire");
+        const subject: Lowered = .{ .code = try std.fmt.allocPrint(gen.arena, "props.{f}", .{std.zig.fmtId(prop.name)}), .type = prop.type };
+        gen.props_used = true;
+
+        try gen.flush();
+        // The reactive arm only where its rows can be a prototype; a list whose rows read
+        // what a wire cannot say stays rows alone, as before.
+        const reactive = try gen.trial(gen.indent + 1, struct {
+            fn emit(inner: *Generator, args: anytype) Error!void {
+                try inner.reactive_rows(args.e, args.prop, args.function, args.capture, args.subject);
+            }
+        }.emit, .{ .e = e, .prop = prop, .function = function, .capture = capture, .subject = subject });
+
+        if (reactive) |arm| {
+            try gen.line("if (props.publr_bind_{s}) |{s}| {{", .{ prop.name, capture });
+            try gen.body.writer.writeAll(arm.body);
+            try gen.blocks.writer.writeAll(arm.blocks);
+            try gen.line("}} else {{", .{});
+            gen.indent += 1;
+        }
+        const item_type: Type = switch (prop.type) {
+            .array => |fields| .{ .item = fields },
+            else => .string,
+        };
+        try gen.line("for ({s}) |{s}| {{", .{ subject.code, parameter });
+        gen.indent += 1;
+        try gen.locals.append(gen.arena, .{ .name = parameter, .type = item_type });
+        try gen.child_expression(function.body);
+        try gen.flush();
+        _ = gen.locals.pop();
+        gen.indent -= 1;
+        try gen.line("}}", .{});
+        if (reactive != null) {
+            gen.indent -= 1;
+            try gen.line("}}", .{});
+        }
+    }
+
+    const Arm = struct { body: []const u8, blocks: []const u8 };
+
+    /// Runs `emit` into fresh buffers at `indent`; the code it wrote when it lowered, null
+    /// (everything it touched put back) when it did not.
+    fn trial(gen: *Generator, indent: u32, comptime emit: anytype, args: anytype) Error!?Arm {
+        const saved_body = gen.body;
+        const saved_blocks = gen.blocks;
+        const saved_indent = gen.indent;
+        const saved_templates = gen.templates.items.len;
+        const saved_aliases = gen.wire_aliases.items.len;
+        const saved_locals = gen.locals.items.len;
+        const saved_imports = gen.imports_used.items.len;
+        const saved_writer = gen.writer_name;
+        const saved_depths = .{ gen.template_depth, gen.seeded_depth };
+
+        gen.body = .init(gen.arena);
+        gen.blocks = .init(gen.arena);
+        gen.indent = indent;
+        const lowered = if (emit(gen, args)) true else |failure| switch (failure) {
+            error.Pjsx => false,
+            else => return failure,
+        };
+        const arm: Arm = .{ .body = gen.body.written(), .blocks = gen.blocks.written() };
+
+        gen.body = saved_body;
+        gen.blocks = saved_blocks;
+        gen.indent = saved_indent;
+        gen.pending.clearRetainingCapacity();
+        if (!lowered) {
+            gen.templates.shrinkRetainingCapacity(saved_templates);
+            gen.wire_aliases.shrinkRetainingCapacity(saved_aliases);
+            gen.locals.shrinkRetainingCapacity(saved_locals);
+            gen.imports_used.shrinkRetainingCapacity(saved_imports);
+            gen.writer_name = saved_writer;
+            gen.template_depth = saved_depths[0];
+            gen.seeded_depth = saved_depths[1];
+            return null;
+        }
+        return arm;
+    }
+
+    fn reactive_rows(gen: *Generator, e: *const ExpressionIR, prop: Field, function: anytype, capture: []const u8, subject: Lowered) Error!void {
+        _ = prop;
+        const parameter = function.parameters[0];
+        const body = function.body;
+        try gen.wire_aliases.append(gen.arena, parameter);
+        defer _ = gen.wire_aliases.pop();
+        try gen.static("<template data-p-template=\"");
+        try gen.static(try gen.template_id(e));
+        try gen.static("\" data-p-for=\"");
+        try gen.static_escaped(parameter, true);
+        try gen.static(" of ");
+        try gen.flush();
+        try gen.line("try rt.escape({s}, {s});", .{ gen.writer_name, capture });
+        try gen.static("\"");
+        if (body.* == .node and body.node.node.* == .element) {
+            for (body.node.node.element.attributes) |attr| {
+                if (attr == .attribute and std.mem.eql(u8, attr.attribute.name, "key")) {
+                    const key = (try gen.wire_spec(attr.attribute.value)) orelse return gen.fail("a reactive list key must be a row path", .{});
+                    try gen.static(" data-p-key=\"");
+                    try gen.static_escaped(key.spec, true);
+                    try gen.static("\"");
+                }
+            }
+        }
+        try gen.static(">");
+        gen.template_depth += 1;
+        try gen.row_body(body);
+        gen.template_depth -= 1;
+        try gen.static("</template>");
+        try gen.seeded_rows(subject, function);
+        try gen.flush();
     }
 
     fn template_id(gen: *Generator, expr: *const ExpressionIR) Error![]const u8 {
@@ -3771,18 +3963,26 @@ const Generator = struct {
                 }
                 return null;
             },
-            // Ternary with literal arms: the two-arm bind form `cond -> a ~ b`.
+            // Ternary: the two-arm bind form `cond -> a ~ b`; an arm is a literal or
+            // itself a wire, grouped (`$h > 0 -> ('height:' + $h + 'px') ~ ''`).
             .conditional => |conditional| {
                 const test_wire = (try gen.wire_spec(conditional.@"test")) orelse return null;
-                const consequent = (try gen.wire_literal(conditional.consequent)) orelse return null;
-                const alternate = (try gen.wire_literal(conditional.alternate)) orelse return null;
+                const consequent = (try gen.wire_arm(conditional.consequent)) orelse return null;
+                const alternate = (try gen.wire_arm(conditional.alternate)) orelse return null;
                 return .{
-                    .spec = try std.fmt.allocPrint(gen.arena, "{s} -> {s} ~ {s}", .{ test_wire.spec, consequent, alternate }),
-                    .own = test_wire.own,
+                    .spec = try std.fmt.allocPrint(gen.arena, "{s} -> {s} ~ {s}", .{ test_wire.spec, consequent.spec, alternate.spec }),
+                    .own = test_wire.own or consequent.own or alternate.own,
                 };
             },
             else => return null,
         }
+    }
+
+    /// One arm of a ternary wire: a literal, or a wire in parentheses.
+    fn wire_arm(gen: *Generator, e: *const ExpressionIR) Error!?Wired {
+        if (try gen.wire_literal(e)) |literal| return .{ .spec = literal, .own = false };
+        const wired = (try gen.wire_spec(e)) orelse return null;
+        return .{ .spec = try std.fmt.allocPrint(gen.arena, "({s})", .{wired.spec}), .own = wired.own };
     }
 
     /// Preserve numeric negation: NaN makes !(a <= b) differ from a > b.
