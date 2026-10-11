@@ -15,10 +15,14 @@ test "every design-system component lowers through the zig target" {
     const arena = arena_state.allocator();
     const io = std.testing.io;
 
-    var dir = try std.Io.Dir.cwd().openDir(io, ds_root, .{ .iterate = true });
+    var dir = try std.Io.Dir.cwd().openDir(io, ds_root, .{
+        .iterate = true,
+    });
     defer dir.close(io);
 
-    var resolver = pjsx.FileResolver{ .io = io };
+    var resolver = pjsx.FileResolver{
+        .io = io,
+    };
     var irs: std.ArrayList(*const pjsx.compiler.ModuleIR) = .empty;
     var walker = try dir.walk(arena);
     defer walker.deinit();

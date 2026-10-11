@@ -54,10 +54,13 @@ test "unannotated destructuring infers optional widened primitives" {
 const Imports = struct {
     fn load(_: *anyopaque, _: std.mem.Allocator, _: []const u8, specifier: []const u8) pjsx.Error!?pjsx.TypeSource {
         if (!std.mem.eql(u8, specifier, "./types")) return null;
-        return .{ .filename = "types.ts", .code =
-        \\export const sizes = { small: "1", large: "2" } as const;
-        \\export interface Base { size: keyof typeof sizes; hidden?: boolean; ignored: string; }
-        \\export type Props = Omit<Base, "ignored"> & { size: "small" };
+        return .{
+            .filename = "types.ts",
+            .code =
+            \\export const sizes = { small: "1", large: "2" } as const;
+            \\export interface Base { size: keyof typeof sizes; hidden?: boolean; ignored: string; }
+            \\export type Props = Omit<Base, "ignored"> & { size: "small" };
+            ,
         };
     }
 };
@@ -66,7 +69,10 @@ test "imported interfaces keyof and intersections preserve narrowed fields" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var context: u8 = 0;
-    const resolver = pjsx.TypeResolver{ .context = &context, .load = Imports.load };
+    const resolver = pjsx.TypeResolver{
+        .context = &context,
+        .load = Imports.load,
+    };
     const parsed = try pjsx.analyze.parsePjsxWithResolver(arena.allocator(),
         \\import type { Props } from "./types";
         \\export function Example({ size, hidden }: Props) { return <div>{size}{hidden && <b>Hidden</b>}</div>; }
@@ -108,7 +114,9 @@ test "DOM defaults remain native and typed guards work through map scopes" {
         \\export function Example({ label = nextLabel(), enabled, items }: Props) {
         \\  return <div>{enabled && <b>On</b>}{items.map(item => <i>{item.label && <b>Label</b>}{item.enabled && <b>On</b>}</i>)}</div>;
         \\}
-    , .{ .filename = "Example.ptsx" });
+    , .{
+        .filename = "Example.ptsx",
+    });
     try contains(output.code, "label = nextLabel()");
     try contains(output.code, "enabled === true");
     try contains(output.code, "$$p().label != null");

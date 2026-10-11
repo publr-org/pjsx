@@ -155,7 +155,11 @@ pub fn stripTypes(allocator: Allocator, code: []const u8, filename: []const u8) 
         },
         else => return e,
     };
-    var collector = Collector{ .allocator = allocator, .source = code, .ranges = .empty };
+    var collector = Collector{
+        .allocator = allocator,
+        .source = code,
+        .ranges = .empty,
+    };
     try collector.ranges.appendSlice(allocator, parsed.ts_ranges);
     ast.walk(parsed.program, &collector, Collector.visit) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,

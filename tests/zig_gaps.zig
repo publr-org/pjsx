@@ -688,7 +688,10 @@ test "closed gap: null against an optional prop" {
 }
 
 const TestRequest = struct {
-    session: struct { name: []const u8, email: []const u8 },
+    session: struct {
+        name: []const u8,
+        email: []const u8,
+    },
     signed_in: bool,
 };
 
@@ -710,7 +713,8 @@ test "closed gap: a server render reads the request it was handed" {
     // every page forwards.
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const code = try lowersWithRequest(arena.allocator(), &.{.{ "Rail.ptsx",
+    const code = try lowersWithRequest(arena.allocator(), &.{.{
+        "Rail.ptsx",
         \\import { Publr } from "publr-jsx";
         \\export function Rail() {
         \\  return <nav>{Publr.request.signed_in && <span>{Publr.request.session.email}</span>}</nav>;
@@ -726,12 +730,14 @@ test "closed gap: every component call hands the request down" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const code = try lowersWithRequest(arena.allocator(), &.{
-        .{ "Inner.ptsx",
-        \\export function Inner() { return <span>hi</span>; }
+        .{
+            "Inner.ptsx",
+            \\export function Inner() { return <span>hi</span>; }
         },
-        .{ "Outer.ptsx",
-        \\import { Inner } from "./Inner.ptsx";
-        \\export function Outer() { return <div><Inner /></div>; }
+        .{
+            "Outer.ptsx",
+            \\import { Inner } from "./Inner.ptsx";
+            \\export function Outer() { return <div><Inner /></div>; }
         },
     }, "Outer");
     try expectMatch(code, "Inner\\.render\\(w, arena, \\.\\{ \\.publr_request = props\\.publr_request,", "");
@@ -764,15 +770,17 @@ test "closed gap: a literal list of objects fills an array prop" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const code = try lowersWithRequest(arena.allocator(), &.{
-        .{ "Trail.ptsx",
-        \\export type TrailProps = { parents: Array<{ label: string; href: string }> };
-        \\export function Trail({ parents }: TrailProps) {
-        \\  return <ol>{parents.map((parent) => <li><a href={parent.href}>{parent.label}</a></li>)}</ol>;
-        \\}
+        .{
+            "Trail.ptsx",
+            \\export type TrailProps = { parents: Array<{ label: string; href: string }> };
+            \\export function Trail({ parents }: TrailProps) {
+            \\  return <ol>{parents.map((parent) => <li><a href={parent.href}>{parent.label}</a></li>)}</ol>;
+            \\}
         },
-        .{ "Page.ptsx",
-        \\import { Trail } from "./Trail.ptsx";
-        \\export function Page() { return <Trail parents={[{ label: "Structure", href: "/admin/structure" }]} />; }
+        .{
+            "Page.ptsx",
+            \\import { Trail } from "./Trail.ptsx";
+            \\export function Page() { return <Trail parents={[{ label: "Structure", href: "/admin/structure" }]} />; }
         },
     }, "Page");
     try expectMatch(code, "\\.parents = &\\[_\\]Trail\\.ParentsItem\\{ \\.\\{ \\.label = \"Structure\", \\.href = \"/admin/structure\", \\},", "");
@@ -783,18 +791,20 @@ test "closed gap: markup fills a node prop, absent when guarded off" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const code = try lowersWithRequest(arena.allocator(), &.{
-        .{ "Frame.ptsx",
-        \\export type FrameProps = { actions?: JSX.Element; empty?: JSX.Element };
-        \\export function Frame({ actions, empty }: FrameProps) {
-        \\  return <div>{actions}{empty && <p>{empty}</p>}</div>;
-        \\}
+        .{
+            "Frame.ptsx",
+            \\export type FrameProps = { actions?: JSX.Element; empty?: JSX.Element };
+            \\export function Frame({ actions, empty }: FrameProps) {
+            \\  return <div>{actions}{empty && <p>{empty}</p>}</div>;
+            \\}
         },
-        .{ "Page.ptsx",
-        \\import { Frame } from "./Frame.ptsx";
-        \\export type PageProps = { none: boolean; label: string };
-        \\export function Page({ none, label }: PageProps) {
-        \\  return <Frame actions={<b>{label}</b>} empty={none && <i>nothing</i>} />;
-        \\}
+        .{
+            "Page.ptsx",
+            \\import { Frame } from "./Frame.ptsx";
+            \\export type PageProps = { none: boolean; label: string };
+            \\export function Page({ none, label }: PageProps) {
+            \\  return <Frame actions={<b>{label}</b>} empty={none && <i>nothing</i>} />;
+            \\}
         },
     }, "Page");
     try expectMatch(code, "\\.actions = rt\\.block\\(&markup_[0-9]+, Markup_[0-9]+\\),", "");
@@ -806,12 +816,14 @@ test "closed gap: a module names the component its root is drawn by" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const code = try compile(arena.allocator(), &.{
-        .{ "Frame.ptsx",
-        \\export function Frame() { return <main />; }
+        .{
+            "Frame.ptsx",
+            \\export function Frame() { return <main />; }
         },
-        .{ "Page.ptsx",
-        \\import { Frame } from "./Frame.ptsx";
-        \\export function Page() { return <Frame />; }
+        .{
+            "Page.ptsx",
+            \\import { Frame } from "./Frame.ptsx";
+            \\export function Page() { return <Frame />; }
         },
     }, "Page");
     try expectMatch(code, "pub const root_component: \\[\\]const u8 = \"Frame\";", "");
@@ -836,12 +848,14 @@ test "closed gap: a prop's enum type never takes an imported component's name" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const code = try compile(arena.allocator(), &.{
-        .{ "Icon.ptsx",
-        \\export function Icon({ name }: { name: "plus" | "link" }) { return <svg data-name={name} />; }
+        .{
+            "Icon.ptsx",
+            \\export function Icon({ name }: { name: "plus" | "link" }) { return <svg data-name={name} />; }
         },
-        .{ "Card.ptsx",
-        \\import { Icon } from "./Icon.ptsx";
-        \\export function Card({ icon }: { icon: "plus" | "link" }) { return <Icon name={icon} />; }
+        .{
+            "Card.ptsx",
+            \\import { Icon } from "./Icon.ptsx";
+            \\export function Card({ icon }: { icon: "plus" | "link" }) { return <Icon name={icon} />; }
         },
     }, "Card");
     try expectMatch(code, "pub const IconValue = enum", "");

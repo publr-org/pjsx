@@ -45,7 +45,10 @@ pub const Token = struct {
     }
 };
 
-pub const State = struct { pos: u32, token: Token };
+pub const State = struct {
+    pos: u32,
+    token: Token,
+};
 
 pub const Lexer = struct {
     allocator: Allocator,
@@ -54,11 +57,17 @@ pub const Lexer = struct {
     token: Token = .{},
 
     pub fn init(allocator: Allocator, src: []const u8) Lexer {
-        return .{ .allocator = allocator, .src = src };
+        return .{
+            .allocator = allocator,
+            .src = src,
+        };
     }
 
     pub fn save(self: *const Lexer) State {
-        return .{ .pos = self.pos, .token = self.token };
+        return .{
+            .pos = self.pos,
+            .token = self.token,
+        };
     }
 
     pub fn restore(self: *Lexer, state: State) void {
@@ -127,7 +136,10 @@ pub const Lexer = struct {
     /// Scan the next token in expression/statement context.
     pub fn next(self: *Lexer) err.Error!Token {
         const newline = try self.skipTrivia();
-        var tok = Token{ .start = self.pos, .newline_before = newline };
+        var tok = Token{
+            .start = self.pos,
+            .newline_before = newline,
+        };
         if (self.pos >= self.src.len) {
             tok.kind = .eof;
             tok.end = self.pos;
@@ -389,7 +401,9 @@ pub const Lexer = struct {
     pub fn rescanTemplateContinuation(self: *Lexer) err.Error!Token {
         std.debug.assert(self.token.isPunct("}"));
         self.pos = self.token.start + 1;
-        var tok = Token{ .start = self.token.start };
+        var tok = Token{
+            .start = self.token.start,
+        };
         try self.scanTemplateSpan(&tok, false);
         tok.end = self.pos;
         self.token = tok;
@@ -419,7 +433,13 @@ pub const Lexer = struct {
             self.pos += 1;
         }
         while (self.pos < self.src.len and isIdentPart(self.src[self.pos])) self.pos += 1;
-        const tok = Token{ .kind = .regex, .start = start, .end = self.pos, .text = self.src[start..self.pos], .newline_before = self.token.newline_before };
+        const tok = Token{
+            .kind = .regex,
+            .start = start,
+            .end = self.pos,
+            .text = self.src[start..self.pos],
+            .newline_before = self.token.newline_before,
+        };
         self.token = tok;
         return tok;
     }
@@ -448,7 +468,10 @@ pub const Lexer = struct {
     /// Scan a token inside a JSX tag: single-char punctuators, dashed identifiers, raw strings.
     pub fn nextJsxTag(self: *Lexer) err.Error!Token {
         const newline = try self.skipTrivia();
-        var tok = Token{ .start = self.pos, .newline_before = newline };
+        var tok = Token{
+            .start = self.pos,
+            .newline_before = newline,
+        };
         if (self.pos >= self.src.len) {
             tok.kind = .eof;
             tok.end = self.pos;
@@ -489,7 +512,9 @@ pub const Lexer = struct {
 
     /// Scan a JSX child token: text up to `{` / `<`, or that punctuator.
     pub fn nextJsxChild(self: *Lexer) err.Error!Token {
-        var tok = Token{ .start = self.pos };
+        var tok = Token{
+            .start = self.pos,
+        };
         if (self.pos >= self.src.len) {
             tok.kind = .eof;
             tok.end = self.pos;
@@ -527,7 +552,10 @@ pub fn appendCodepoint(allocator: Allocator, out: *std.ArrayList(u8), cp: u21) A
     try out.appendSlice(allocator, buf[0..len]);
 }
 
-const named_entities = [_]struct { []const u8, u21 }{
+const named_entities = [_]struct {
+    []const u8,
+    u21,
+}{
     .{ "amp", '&' },      .{ "lt", '<' },       .{ "gt", '>' },       .{ "quot", '"' },      .{ "apos", '\'' },
     .{ "nbsp", 0xa0 },    .{ "copy", 0xa9 },    .{ "reg", 0xae },     .{ "hellip", 0x2026 }, .{ "mdash", 0x2014 },
     .{ "ndash", 0x2013 }, .{ "times", 0xd7 },   .{ "laquo", 0xab },   .{ "raquo", 0xbb },    .{ "rarr", 0x2192 },

@@ -21,7 +21,16 @@ pub fn lowerWithResolver(a: A, module: *const compiler.ModuleIR, resolver: @impo
 }
 fn lowerTarget(a: A, module: *const compiler.ModuleIR, html_mode: bool, resolver: ?@import("types.zig").Resolver) Error!S {
     const static_only = html_mode and try @import("inline_html.zig").isStaticShell(a, module.source, module.filename);
-    var g = Generator{ .a = a, .module = module, .out = .init(a), .locals = .init(a), .metadata = .init(a), .html = html_mode and !static_only, .static_only = static_only, .resolver = resolver };
+    var g = Generator{
+        .a = a,
+        .module = module,
+        .out = .init(a),
+        .locals = .init(a),
+        .metadata = .init(a),
+        .html = html_mode and !static_only,
+        .static_only = static_only,
+        .resolver = resolver,
+    };
     const canonical = try @import("canonicalize.zig").canonicalize(a, module.source);
     g.declarations = try intrinsic.inspect(a, canonical.code, module.filename);
     for (module.component.props.values()) |prop| {
@@ -295,11 +304,19 @@ const Generator = struct {
             .reference => |reference| if (reference.source == .prop) blk: {
                 const key = try g.quote(reference.name);
                 if (g.module.component.props.get(reference.name)) |prop| if (prop.default) |default| {
-                    const fallback: E = .{ .literal = switch (default) {
-                        .string => |v| .{ .string = v },
-                        .number => |v| .{ .number = v },
-                        .boolean => |v| .{ .boolean = v },
-                    } };
+                    const fallback: E = .{
+                        .literal = switch (default) {
+                            .string => |v| .{
+                                .string = v,
+                            },
+                            .number => |v| .{
+                                .number = v,
+                            },
+                            .boolean => |v| .{
+                                .boolean = v,
+                            },
+                        },
+                    };
                     break :blk try std.fmt.allocPrint(g.a, "(if (props == .object and props.object.contains({s})) try rt.get(props, {s}) else {s})", .{ key, key, try g.emitExpression(&fallback) });
                 };
                 break :blk try std.fmt.allocPrint(g.a, "try rt.get(props, {s})", .{key});
@@ -785,11 +802,19 @@ test "native imported shared store reads literal initial state without running b
         source: S,
         fn load(context: *anyopaque, _: A, _: S, _: S) err.Error!?@import("types.zig").Source {
             const self: *@This() = @ptrCast(@alignCast(context));
-            return .{ .filename = "shared.ts", .code = self.source };
+            return .{
+                .filename = "shared.ts",
+                .code = self.source,
+            };
         }
     };
-    var fixture = Fixture{ .source = "import {createStore as shared} from 'publr'; export const counter = shared('Counter', () => ({state: {count: 7}, actions: ({state}) => ({increment() {state.count++;}})}));" };
-    const resolver: @import("types.zig").Resolver = .{ .context = &fixture, .load = Fixture.load };
+    var fixture = Fixture{
+        .source = "import {createStore as shared} from 'publr'; export const counter = shared('Counter', () => ({state: {count: 7}, actions: ({state}) => ({increment() {state.count++;}})}));",
+    };
+    const resolver: @import("types.zig").Resolver = .{
+        .context = &fixture,
+        .load = Fixture.load,
+    };
     const module = try compiler.createPjsxModule(a, "import {counter as sharedCount} from './shared'; export function Counter() { return <output>{sharedCount.count}</output>; }", "Counter.ptsx");
     const code = try lowerWithResolver(a, module, resolver);
     try std.testing.expect(std.mem.indexOf(u8, code, ".float = 7") != null);
@@ -805,11 +830,17 @@ test "display-only composition shares parent HTML bindings and preserves statefu
     const a = arena.allocator();
     const Fixture = struct {
         fn load(_: *anyopaque, _: A, _: S, _: S) err.Error!?@import("types.zig").Source {
-            return .{ .filename = "Display.ptsx", .code = "export function Display(props: { value: number }) { return (<output>{props.value}</output>); }" };
+            return .{
+                .filename = "Display.ptsx",
+                .code = "export function Display(props: { value: number }) { return (<output>{props.value}</output>); }",
+            };
         }
     };
     var context: u8 = 0;
-    const resolver = @import("types.zig").Resolver{ .context = &context, .load = Fixture.load };
+    const resolver = @import("types.zig").Resolver{
+        .context = &context,
+        .load = Fixture.load,
+    };
     const module = try compiler.createPjsxModuleWithResolver(a, "import { state } from 'publr'; import { Display } from './Display.ptsx'; export function Parent() { let count = state(0); function increment() { count++; } return <div><button onClick={increment}>Increment</button><Display value={count}/></div>; }", "Parent.ptsx", resolver);
     const native = try lowerWithResolver(a, module, resolver);
     const companion = try behavior(a, module);

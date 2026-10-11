@@ -9,7 +9,10 @@ pub fn build(b: *std.Build, library: *std.Build.Module) void {
             .root_source_file = b.path("src/main.zig"),
             .target = library.resolved_target,
             .optimize = library.optimize,
-            .imports = &.{.{ .name = "pjsx", .module = library }},
+            .imports = &.{.{
+                .name = "pjsx",
+                .module = library,
+            }},
         }),
     });
     b.installArtifact(exe);

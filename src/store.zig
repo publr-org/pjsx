@@ -144,7 +144,12 @@ pub const Ctx = struct {
     finite_maps: *const FiniteStringMaps,
 
     pub fn withBindings(self: Ctx, bindings: *const Bindings) Ctx {
-        return .{ .a = self.a, .bindings = bindings, .schema = self.schema, .finite_maps = self.finite_maps };
+        return .{
+            .a = self.a,
+            .bindings = bindings,
+            .schema = self.schema,
+            .finite_maps = self.finite_maps,
+        };
     }
 
     pub fn field(self: Ctx, name: ?[]const u8) ?PropSchema {
@@ -346,7 +351,10 @@ fn expressionReadsBoundProp(a: Allocator, node: *Node, bindings: *const Bindings
             return bound != null;
         }
     };
-    return ast.contains(node, Pred{ .a = a, .bindings = bindings }, Pred.check);
+    return ast.contains(node, Pred{
+        .a = a,
+        .bindings = bindings,
+    }, Pred.check);
 }
 
 pub fn reactivePropSeeds(a: Allocator, reactive: *const ReactiveBinding, bindings: *const Bindings) Error![]const ReactivePropSeed {
@@ -359,7 +367,11 @@ pub fn reactivePropSeeds(a: Allocator, reactive: *const ReactiveBinding, binding
         const prop_name = try initialBoundProp(a, field.value_node.?, bindings);
         const reads_prop = prop_name != null or expressionReadsBoundProp(a, field.value_node.?, bindings);
         if (state_field != null and reads_prop) {
-            try seeds.append(a, .{ .state_field = state_field.?, .prop_name = prop_name, .value = field.value_node.? });
+            try seeds.append(a, .{
+                .state_field = state_field.?,
+                .prop_name = prop_name,
+                .value = field.value_node.?,
+            });
         }
     }
     return seeds.toOwnedSlice(a);
@@ -409,7 +421,12 @@ pub fn lowerParsedStoreRegistration(allocator: Allocator, parsed_ptr: *const ana
     const reactive: ReactiveBinding = parsed.component.reactive orelse (try familyAsWireBinding(a, &parsed)) orelse return null;
     const finite_maps = try analyze.collectFiniteStringMaps(a, parsed.program);
     const src = parsed.canonical;
-    const ctx = Ctx{ .a = a, .bindings = &parsed.component.prop_bindings, .schema = parsed.schema, .finite_maps = &finite_maps };
+    const ctx = Ctx{
+        .a = a,
+        .bindings = &parsed.component.prop_bindings,
+        .schema = parsed.schema,
+        .finite_maps = &finite_maps,
+    };
 
     var prop_fallbacks: StringList = .empty;
     for (parsed.component.prop_bindings.keys(), parsed.component.prop_bindings.values()) |binding, prop_name| {
@@ -459,5 +476,8 @@ pub fn lowerParsedStoreRegistration(allocator: Allocator, parsed_ptr: *const ana
     try code.appendSlice(a, "  };\n");
     try code.appendSlice(a, "});\n");
 
-    return .{ .name = reactive.wire_name, .code = try code.toOwnedSlice(a) };
+    return .{
+        .name = reactive.wire_name,
+        .code = try code.toOwnedSlice(a),
+    };
 }

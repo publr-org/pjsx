@@ -12,9 +12,14 @@ const Error = err.Error || std.Io.Writer.Error;
 
 pub fn behavior(a: A, module: *const @import("compiler.zig").ModuleIR) Error!S {
     const canonical = try @import("canonicalize.zig").canonicalize(a, module.source);
-    const source = try @import("intrinsics.zig").compile(a, canonical.code, module.filename, .{ .html = true });
+    const source = try @import("intrinsics.zig").compile(a, canonical.code, module.filename, .{
+        .html = true,
+    });
     const program = try parser.parse(a, source, module.filename);
-    var t = Transform{ .a = a, .source = source };
+    var t = Transform{
+        .a = a,
+        .source = source,
+    };
     const code = try t.emit(program);
     if (try @import("inline_html.zig").isStaticShell(a, module.source, module.filename))
         return @import("strip_types.zig").stripTypes(a, try std.fmt.allocPrint(a, "import * as $$html from \"publr/html\";\n{s}", .{code}), module.filename);

@@ -33,5 +33,9 @@ fn compileZig(allocator: Allocator, module: *const compiler.ModuleIR, _: compile
 
 /// The `zig` SSR target: PJSX IR → Zig render functions (see `targets/zig.zig`).
 pub fn zigTarget() ZigTarget {
-    return .{ .name = "zig", .api_version = 1, .compile = compileZig };
+    return .{
+        .name = "zig",
+        .api_version = 1,
+        .compile = compileZig,
+    };
 }

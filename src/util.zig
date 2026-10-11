@@ -256,7 +256,9 @@ pub fn OrderedMap(comptime V: type) type {
         allocator: Allocator,
 
         pub fn init(allocator: Allocator) Self {
-            return .{ .allocator = allocator };
+            return .{
+                .allocator = allocator,
+            };
         }
         pub fn put(self: *Self, key: []const u8, value: V) Allocator.Error!void {
             try self.map.put(self.allocator, key, value);
@@ -280,7 +282,10 @@ pub fn OrderedMap(comptime V: type) type {
             return self.map.values();
         }
         pub fn clone(self: *const Self) Allocator.Error!Self {
-            return .{ .allocator = self.allocator, .map = try self.map.clone(self.allocator) };
+            return .{
+                .allocator = self.allocator,
+                .map = try self.map.clone(self.allocator),
+            };
         }
     };
 }
@@ -296,7 +301,10 @@ test "jsonString escapes like JSON.stringify" {
 
 test "numberToString follows JavaScript formatting" {
     const a = std.testing.allocator;
-    const cases = [_]struct { f64, []const u8 }{ .{ 50, "50" }, .{ 0.5, "0.5" }, .{ -3, "-3" }, .{ 12.25, "12.25" }, .{ 0, "0" } };
+    const cases = [_]struct {
+        f64,
+        []const u8,
+    }{ .{ 50, "50" }, .{ 0.5, "0.5" }, .{ -3, "-3" }, .{ 12.25, "12.25" }, .{ 0, "0" } };
     for (cases) |case| {
         const out = try numberToString(a, case[0]);
         defer a.free(out);

@@ -358,7 +358,10 @@ pub fn childFields(t: Type) []const ChildField {
     };
 }
 
-pub const ChildField = struct { Field, bool };
+pub const ChildField = struct {
+    Field,
+    bool,
+};
 
 pub const Field = enum {
     id,
@@ -510,13 +513,19 @@ pub fn unparen(node: *Node) *Node {
 
 pub fn newNode(allocator: Allocator, t: Type, start: u32, end: u32) Allocator.Error!*Node {
     const node = try allocator.create(Node);
-    node.* = .{ .type = t, .start = start, .end = end };
+    node.* = .{
+        .type = t,
+        .start = start,
+        .end = end,
+    };
     return node;
 }
 
 pub fn literalString(allocator: Allocator, value: []const u8, source: ?*const Node) Allocator.Error!*Node {
     const node = try newNode(allocator, .Literal, if (source) |s| s.start else 0, if (source) |s| s.end else 0);
-    node.value = .{ .string = value };
+    node.value = .{
+        .string = value,
+    };
     const util = @import("util.zig");
     node.raw = try util.jsonString(allocator, value);
     return node;
@@ -545,6 +554,9 @@ test "childFields order visits JSX element children in source order" {
             try self.list.append(self.alloc, n.type);
         }
     };
-    try walk(el, Ctx{ .list = &seen, .alloc = a }, Ctx.visit);
+    try walk(el, Ctx{
+        .list = &seen,
+        .alloc = a,
+    }, Ctx.visit);
     try std.testing.expectEqualSlices(Type, &.{ .JSXElement, .JSXOpeningElement, .JSXText, .JSXClosingElement }, seen.items);
 }

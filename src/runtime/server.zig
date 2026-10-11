@@ -52,11 +52,15 @@ pub const Node = struct {
     }
 };
 
-pub const empty_node: Node = .{ .raw = "" };
+pub const empty_node: Node = .{
+    .raw = "",
+};
 
 /// Markup rendered ahead of time, written as it is.
 pub fn raw(html: []const u8) Node {
-    return .{ .raw = html };
+    return .{
+        .raw = html,
+    };
 }
 
 /// A caller's children: `capture` points at the generated capture struct (the
@@ -72,7 +76,10 @@ pub fn block(capture: anytype, comptime Body: type) Node {
             return Body.render(self.*, w, arena);
         }
     };
-    return .{ .ctx = capture, .render_fn = &Thunk.call };
+    return .{
+        .ctx = capture,
+        .render_fn = &Thunk.call,
+    };
 }
 
 /// A view rendered ahead of time as a node for a page: `Body.render(capture, w, arena,
@@ -85,7 +92,10 @@ pub fn viewed(capture: anytype, comptime Body: type) Node {
             return Body.render(self.*, w, arena, request);
         }
     };
-    return .{ .ctx = capture, .render_fn = &Thunk.call };
+    return .{
+        .ctx = capture,
+        .render_fn = &Thunk.call,
+    };
 }
 
 /// A node as a string, for the two places that need to look at the markup:
@@ -108,7 +118,9 @@ test "a block node streams into the writer it is given and knows when it is empt
         }
     };
     const label: []const u8 = "a & b";
-    const capture = .{ .label = &label };
+    const capture = .{
+        .label = &label,
+    };
     const node = block(&capture, Body);
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
@@ -162,13 +174,41 @@ fn prop_value(comptime Target: type, arena: std.mem.Allocator, source: anytype) 
 }
 
 test "array props cross module types with nested values and empty slices intact" {
-    const SourceOption = struct { label: []const u8, selected: bool, kind: enum { first, second } };
-    const TargetOption = struct { label: []const u8, selected: bool, kind: enum { second, first } };
-    const Source = struct { name: []const u8, options: []const SourceOption, help: ?[]const u8 };
-    const Target = struct { name: []const u8, options: []const TargetOption, help: ?[]const u8 };
+    const SourceOption = struct {
+        label: []const u8,
+        selected: bool,
+        kind: enum { first, second },
+    };
+    const TargetOption = struct {
+        label: []const u8,
+        selected: bool,
+        kind: enum { second, first },
+    };
+    const Source = struct {
+        name: []const u8,
+        options: []const SourceOption,
+        help: ?[]const u8,
+    };
+    const Target = struct {
+        name: []const u8,
+        options: []const TargetOption,
+        help: ?[]const u8,
+    };
     const source: []const Source = &.{
-        .{ .name = "first", .options = &.{.{ .label = "A & B", .selected = true, .kind = .first }}, .help = "Help" },
-        .{ .name = "second", .options = &.{}, .help = null },
+        .{
+            .name = "first",
+            .options = &.{.{
+                .label = "A & B",
+                .selected = true,
+                .kind = .first,
+            }},
+            .help = "Help",
+        },
+        .{
+            .name = "second",
+            .options = &.{},
+            .help = null,
+        },
     };
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -192,11 +232,23 @@ test "array props cross module types with nested values and empty slices intact"
 test "array prop conversion reports allocation failures at every nesting level" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
         fn run(allocator: std.mem.Allocator) !void {
-            const SourceValue = struct { text: []const u8 };
-            const Source = struct { values: []const SourceValue };
-            const Target = struct { values: []const struct { text: []const u8 } };
-            const values = [_]SourceValue{.{ .text = "nested" }} ** 256;
-            const source: []const Source = &.{.{ .values = &values }};
+            const SourceValue = struct {
+                text: []const u8,
+            };
+            const Source = struct {
+                values: []const SourceValue,
+            };
+            const Target = struct {
+                values: []const struct {
+                    text: []const u8,
+                },
+            };
+            const values = [_]SourceValue{.{
+                .text = "nested",
+            }} ** 256;
+            const source: []const Source = &.{.{
+                .values = &values,
+            }};
             var arena_state = std.heap.ArenaAllocator.init(allocator);
             defer arena_state.deinit();
             const result = try prop_array([]const Target, arena_state.allocator(), source);
@@ -328,7 +380,10 @@ pub fn concat(arena: std.mem.Allocator, parts: []const []const u8) []const u8 {
 
 /// One arm of `wire_match`: a key as wire text (`'small'`, `true`, `_`) and
 /// its payload spec; a null payload leaves the arm out (no value).
-pub const WireArm = struct { key: []const u8, value: ?[]const u8 };
+pub const WireArm = struct {
+    key: []const u8,
+    value: ?[]const u8,
+};
 
 /// A wire as an operand: a plain `$path` or a quoted literal as is, anything
 /// else parenthesized.
@@ -465,7 +520,10 @@ fn root_attr_insert_pos(html: []const u8) ?usize {
     return if (j > 0 and html[j - 1] == '/') j - 1 else j;
 }
 
-const AttrRange = struct { start: usize, end: usize };
+const AttrRange = struct {
+    start: usize,
+    end: usize,
+};
 
 fn root_attr_range(html: []const u8, name: []const u8) ?AttrRange {
     const close = root_attr_insert_pos(html) orelse return null;
@@ -491,7 +549,10 @@ fn root_attr_range(html: []const u8, name: []const u8) ?AttrRange {
                 while (i < close and !std.ascii.isWhitespace(html[i])) : (i += 1) {}
             }
         }
-        if (std.mem.eql(u8, attr_name, name)) return .{ .start = start, .end = i };
+        if (std.mem.eql(u8, attr_name, name)) return .{
+            .start = start,
+            .end = i,
+        };
     }
     return null;
 }
@@ -823,7 +884,9 @@ test "slot_props merges through transparent display:contents component wrappers"
         "<div data-component=\"Outer:Outer\" style=\"display:contents\">" ++
             "<div data-component=\"Inner:Inner\" style=\"display:contents\">" ++
             "<a href=\"/x\">Go</a></div></div>",
-        .{ .@"data-p-ref" = "trigger" },
+        .{
+            .@"data-p-ref" = "trigger",
+        },
     );
     try std.testing.expectEqualStrings(
         "<div data-component=\"Outer:Outer\" style=\"display:contents\">" ++
@@ -850,16 +913,28 @@ test "write_wire_attr skips unset actions and omits an empty attribute" {
     defer out.deinit();
 
     try write_wire_attr(&out.writer, "data-p-on", &.{
-        .{ .prefix = "click:", .value = null },
-        .{ .prefix = "input:", .value = "sync" },
-        .{ .prefix = "change:", .value = "commit" },
+        .{
+            .prefix = "click:",
+            .value = null,
+        },
+        .{
+            .prefix = "input:",
+            .value = "sync",
+        },
+        .{
+            .prefix = "change:",
+            .value = "commit",
+        },
     });
     try std.testing.expectEqualStrings(" data-p-on=\"input:sync;change:commit\"", out.written());
 
     var empty: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer empty.deinit();
 
-    try write_wire_attr(&empty.writer, "data-p-on", &.{.{ .prefix = "click:", .value = null }});
+    try write_wire_attr(&empty.writer, "data-p-on", &.{.{
+        .prefix = "click:",
+        .value = null,
+    }});
     try std.testing.expectEqualStrings("", empty.written());
 }
 
@@ -903,8 +978,17 @@ test "component forwarding composes refs and handlers through a slot" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const child = slot_props(arena, "<button data-p-ref=\"child\" data-p-on=\"click:childClick\">Go</button>", .{ .@"data-p-ref" = "trigger", .@"data-p-on" = "click:toggle" });
-    const out = splice_attrs(arena, child, &.{ .{ .name = "data-p-ref", .value = "parent" }, .{ .name = "data-p-on", .value = "click:navigate" } });
+    const child = slot_props(arena, "<button data-p-ref=\"child\" data-p-on=\"click:childClick\">Go</button>", .{
+        .@"data-p-ref" = "trigger",
+        .@"data-p-on" = "click:toggle",
+    });
+    const out = splice_attrs(arena, child, &.{ .{
+        .name = "data-p-ref",
+        .value = "parent",
+    }, .{
+        .name = "data-p-on",
+        .value = "click:navigate",
+    } });
     try std.testing.expectEqualStrings("<button data-p-ref=\"child;trigger;parent\" data-p-on=\"click:childClick;click:toggle;click:navigate\">Go</button>", out);
 }
 
@@ -912,8 +996,14 @@ test "structured hydration seeds escape JSON as an HTML attribute" {
     const arena = std.testing.allocator;
     var out: std.Io.Writer.Allocating = .init(arena);
     defer out.deinit();
-    const rows = [_]struct { id: []const u8, label: []const u8 }{
-        .{ .id = "one", .label = "<script>\"&\n" },
+    const rows = [_]struct {
+        id: []const u8,
+        label: []const u8,
+    }{
+        .{
+            .id = "one",
+            .label = "<script>\"&\n",
+        },
     };
     try write_seed_value(&out.writer, arena, &rows);
     try std.testing.expectEqualStrings(
@@ -932,7 +1022,17 @@ pub const RootAttributeWriter = struct {
     phase: enum { before, tag, done } = .before,
 
     pub fn init(target: *std.Io.Writer, name: []const u8, value: ?[]const u8) RootAttributeWriter {
-        return .{ .writer = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} }, .target = target, .name = name, .value = value };
+        return .{
+            .writer = .{
+                .vtable = &.{
+                    .drain = drain,
+                },
+                .buffer = &.{},
+            },
+            .target = target,
+            .name = name,
+            .value = value,
+        };
     }
 
     fn drain(writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
@@ -990,7 +1090,17 @@ pub const ForwardAttributesWriter = struct {
     done: bool = false,
 
     pub fn init(target: *std.Io.Writer, arena: std.mem.Allocator, attrs: []const Attr) ForwardAttributesWriter {
-        return .{ .writer = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} }, .target = target, .head = .init(arena), .attrs = attrs };
+        return .{
+            .writer = .{
+                .vtable = &.{
+                    .drain = drain,
+                },
+                .buffer = &.{},
+            },
+            .target = target,
+            .head = .init(arena),
+            .attrs = attrs,
+        };
     }
 
     pub fn finish(self: *ForwardAttributesWriter) std.Io.Writer.Error!void {
@@ -1034,7 +1144,10 @@ test "forwarded bindings merge on an opening tag while the body streams" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     var out: std.Io.Writer.Allocating = .init(arena_state.allocator());
-    var forward = ForwardAttributesWriter.init(&out.writer, arena_state.allocator(), &.{.{ .name = "data-p-bind", .value = "data-id:$id" }});
+    var forward = ForwardAttributesWriter.init(&out.writer, arena_state.allocator(), &.{.{
+        .name = "data-p-bind",
+        .value = "data-id:$id",
+    }});
     try forward.writer.writeAll("<div title=\"a>");
     try forward.writer.writeAll("b\" data-p-bind=\"aria-expanded:$open\">Body</div>");
     try forward.finish();

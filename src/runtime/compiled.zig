@@ -6,7 +6,9 @@ const W = std.Io.Writer;
 pub fn object(a: A, keys: []const []const u8, values: []const Value) !Value {
     var out: std.json.ObjectMap = .{};
     for (keys, values) |key, value| try out.put(a, key, value);
-    return .{ .object = out };
+    return .{
+        .object = out,
+    };
 }
 // Seed fields use public state names. Defaults remain in the companion module.
 pub fn componentSeed(a: A, values: Value, props: Value, cache: Value) !Value {
@@ -18,12 +20,18 @@ pub fn componentSeed(a: A, values: Value, props: Value, cache: Value) !Value {
 pub fn array(a: A, values: []const Value) !Value {
     var out: std.array_list.Managed(Value) = .init(a);
     try out.appendSlice(values);
-    return .{ .array = out };
+    return .{
+        .array = out,
+    };
 }
 pub fn get(value: Value, key: []const u8) !Value {
     if (value == .object) return value.object.get(key) orelse error.MissingProperty;
-    if (value == .array and std.mem.eql(u8, key, "length")) return .{ .integer = @intCast(value.array.items.len) };
-    if (value == .string and std.mem.eql(u8, key, "length")) return .{ .integer = @intCast(try std.unicode.calcUtf16LeLen(value.string)) };
+    if (value == .array and std.mem.eql(u8, key, "length")) return .{
+        .integer = @intCast(value.array.items.len),
+    };
+    if (value == .string and std.mem.eql(u8, key, "length")) return .{
+        .integer = @intCast(try std.unicode.calcUtf16LeLen(value.string)),
+    };
     return error.MissingProperty;
 }
 pub fn items(value: Value) ![]const Value {
@@ -61,30 +69,60 @@ pub fn string(a: A, value: Value) ![]const u8 {
 }
 pub fn binary(a: A, comptime op: []const u8, left: Value, right: Value) !Value {
     if (comptime std.mem.eql(u8, op, "+")) {
-        if (left == .string or right == .string) return .{ .string = try std.fmt.allocPrint(a, "{s}{s}", .{ try string(a, left), try string(a, right) }) };
+        if (left == .string or right == .string) return .{
+            .string = try std.fmt.allocPrint(a, "{s}{s}", .{ try string(a, left), try string(a, right) }),
+        };
     }
     if (comptime std.mem.eql(u8, op, "===") or std.mem.eql(u8, op, "!==")) {
         const equal = if (left == .string and right == .string) std.mem.eql(u8, left.string, right.string) else if (left == .null or right == .null) left == .null and right == .null else if (left == .bool or right == .bool) left == .bool and right == .bool and left.bool == right.bool else if ((left == .integer or left == .float) and (right == .integer or right == .float)) (try number(left)) == (try number(right)) else false;
-        return .{ .bool = if (comptime std.mem.eql(u8, op, "!==")) !equal else equal };
+        return .{
+            .bool = if (comptime std.mem.eql(u8, op, "!==")) !equal else equal,
+        };
     }
     if (left == .string and right == .string) {
         const order = std.mem.order(u16, try std.unicode.utf8ToUtf16LeAlloc(a, left.string), try std.unicode.utf8ToUtf16LeAlloc(a, right.string));
-        if (comptime std.mem.eql(u8, op, ">")) return .{ .bool = order == .gt };
-        if (comptime std.mem.eql(u8, op, "<")) return .{ .bool = order == .lt };
-        if (comptime std.mem.eql(u8, op, ">=")) return .{ .bool = order != .lt };
-        if (comptime std.mem.eql(u8, op, "<=")) return .{ .bool = order != .gt };
+        if (comptime std.mem.eql(u8, op, ">")) return .{
+            .bool = order == .gt,
+        };
+        if (comptime std.mem.eql(u8, op, "<")) return .{
+            .bool = order == .lt,
+        };
+        if (comptime std.mem.eql(u8, op, ">=")) return .{
+            .bool = order != .lt,
+        };
+        if (comptime std.mem.eql(u8, op, "<=")) return .{
+            .bool = order != .gt,
+        };
     }
     const l = try number(left);
     const r = try number(right);
-    if (comptime std.mem.eql(u8, op, "+")) return .{ .float = l + r };
-    if (comptime std.mem.eql(u8, op, "-")) return .{ .float = l - r };
-    if (comptime std.mem.eql(u8, op, "*")) return .{ .float = l * r };
-    if (comptime std.mem.eql(u8, op, "/")) return .{ .float = l / r };
-    if (comptime std.mem.eql(u8, op, "%")) return .{ .float = @rem(l, r) };
-    if (comptime std.mem.eql(u8, op, ">")) return .{ .bool = l > r };
-    if (comptime std.mem.eql(u8, op, "<")) return .{ .bool = l < r };
-    if (comptime std.mem.eql(u8, op, ">=")) return .{ .bool = l >= r };
-    if (comptime std.mem.eql(u8, op, "<=")) return .{ .bool = l <= r };
+    if (comptime std.mem.eql(u8, op, "+")) return .{
+        .float = l + r,
+    };
+    if (comptime std.mem.eql(u8, op, "-")) return .{
+        .float = l - r,
+    };
+    if (comptime std.mem.eql(u8, op, "*")) return .{
+        .float = l * r,
+    };
+    if (comptime std.mem.eql(u8, op, "/")) return .{
+        .float = l / r,
+    };
+    if (comptime std.mem.eql(u8, op, "%")) return .{
+        .float = @rem(l, r),
+    };
+    if (comptime std.mem.eql(u8, op, ">")) return .{
+        .bool = l > r,
+    };
+    if (comptime std.mem.eql(u8, op, "<")) return .{
+        .bool = l < r,
+    };
+    if (comptime std.mem.eql(u8, op, ">=")) return .{
+        .bool = l >= r,
+    };
+    if (comptime std.mem.eql(u8, op, "<=")) return .{
+        .bool = l <= r,
+    };
     @compileError("Unsupported compiled binary operator");
 }
 pub fn escape(w: *W, input: []const u8) !void {
@@ -102,7 +140,9 @@ pub fn text(w: *W, a: A, value: Value) !void {
     try escape(w, try string(a, value));
 }
 pub fn className(a: A, value: Value) anyerror!Value {
-    if (!truthy(value)) return .{ .string = "" };
+    if (!truthy(value)) return .{
+        .string = "",
+    };
     var parts: std.ArrayList([]const u8) = .empty;
     switch (value) {
         .array => |array_values| for (array_values.items) |item| {
@@ -115,9 +155,13 @@ pub fn className(a: A, value: Value) anyerror!Value {
                 try parts.append(a, entry.key_ptr.*);
             };
         },
-        else => return .{ .string = try string(a, value) },
+        else => return .{
+            .string = try string(a, value),
+        },
     }
-    return .{ .string = try std.mem.join(a, " ", parts.items) };
+    return .{
+        .string = try std.mem.join(a, " ", parts.items),
+    };
 }
 pub fn attribute(w: *W, a: A, name: []const u8, value: Value) !void {
     const aria = std.mem.startsWith(u8, name, "aria-");
@@ -138,7 +182,9 @@ pub fn json(w: *W, a: A, value: anytype) !void {
         }
     }
     var out: W.Allocating = .init(a);
-    try std.json.Stringify.value(value, .{ .emit_null_optional_fields = true }, &out.writer);
+    try std.json.Stringify.value(value, .{
+        .emit_null_optional_fields = true,
+    }, &out.writer);
     // JSON script contents must never contain an HTML closing-tag opener.
     for (out.written()) |byte| switch (byte) {
         '<' => try w.writeAll("\\u003c"),
@@ -182,7 +228,10 @@ pub fn OperationResult(comptime T: type) type {
         policy: OperationPolicy = .{},
     };
 }
-pub const ResolvedOperation = struct { value: Value, policy: OperationPolicy = .{} };
+pub const ResolvedOperation = struct {
+    value: Value,
+    policy: OperationPolicy = .{},
+};
 pub fn nativeResult(comptime operation: anytype, ctx: anytype, a: A, args: []const Value) !ResolvedOperation {
     const info = @typeInfo(@TypeOf(operation)).@"fn";
     if (args.len + 1 != info.params.len) return error.InvalidArguments;
@@ -190,16 +239,30 @@ pub fn nativeResult(comptime operation: anytype, ctx: anytype, a: A, args: []con
     var params: std.meta.ArgsTuple(@TypeOf(operation)) = undefined;
     params[0] = ctx;
     inline for (info.params[1..], 0..) |parameter, index| {
-        const decoded = try std.json.parseFromValue(parameter.type.?, a, args[index], .{ .ignore_unknown_fields = false, .allocate = .alloc_always });
+        const decoded = try std.json.parseFromValue(parameter.type.?, a, args[index], .{
+            .ignore_unknown_fields = false,
+            .allocate = .alloc_always,
+        });
         params[index + 1] = decoded.value;
     }
     const result = try @call(.auto, operation, params);
     var out: W.Allocating = .init(a);
     const branded = comptime @typeInfo(@TypeOf(result)) == .@"struct" and @hasDecl(@TypeOf(result), "publr_operation_result");
     try std.json.Stringify.value(if (branded) result.value else result, .{}, &out.writer);
-    const value = (try std.json.parseFromSlice(Value, a, out.written(), .{ .allocate = .alloc_always })).value;
+    const value = (try std.json.parseFromSlice(Value, a, out.written(), .{
+        .allocate = .alloc_always,
+    })).value;
     try validate(value);
-    return .{ .value = value, .policy = if (branded) .{ .revision = result.policy.revision, .no_store = result.policy.no_store, .revalidate = result.policy.revalidate, .expires = result.policy.expires, .tags = result.policy.tags } else .{} };
+    return .{
+        .value = value,
+        .policy = if (branded) .{
+            .revision = result.policy.revision,
+            .no_store = result.policy.no_store,
+            .revalidate = result.policy.revalidate,
+            .expires = result.policy.expires,
+            .tags = result.policy.tags,
+        } else .{},
+    };
 }
 
 pub fn types(w: *W, comptime operation: anytype, comptime name: []const u8) !void {
@@ -316,7 +379,9 @@ pub fn math(comptime method: []const u8, args: []const Value) !Value {
         const n = try number(arg);
         value = if (std.mem.eql(u8, method, "min")) @min(value, n) else @max(value, n);
     }
-    return .{ .float = value };
+    return .{
+        .float = value,
+    };
 }
 pub fn stringMethod(a: A, comptime method: []const u8, value: Value, args: []const Value) !Value {
     if (value != .string) return error.ExpectedString;
@@ -325,22 +390,30 @@ pub fn stringMethod(a: A, comptime method: []const u8, value: Value, args: []con
         if (args.len != 0) return error.InvalidArguments;
         // Explicit ASCII profile: reject Unicode rather than silently changing JS semantics.
         for (input) |byte| if (byte > 127) return error.UnicodeCaseMappingUnsupported;
-        return .{ .string = if (comptime std.mem.eql(u8, method, "toLowerCase")) try std.ascii.allocLowerString(a, input) else try std.ascii.allocUpperString(a, input) };
+        return .{
+            .string = if (comptime std.mem.eql(u8, method, "toLowerCase")) try std.ascii.allocLowerString(a, input) else try std.ascii.allocUpperString(a, input),
+        };
     }
     if (comptime std.mem.eql(u8, method, "trim")) {
         if (args.len != 0) return error.InvalidArguments;
         for (input) |byte| if (byte > 127) return error.UnicodeTrimUnsupported;
-        return .{ .string = std.mem.trim(u8, input, " \t\n\r\x0b\x0c") };
+        return .{
+            .string = std.mem.trim(u8, input, " \t\n\r\x0b\x0c"),
+        };
     }
     if (args.len != 1 or args[0] != .string) return error.InvalidArguments;
     const needle = args[0].string;
-    return .{ .bool = if (comptime std.mem.eql(u8, method, "includes")) std.mem.indexOf(u8, input, needle) != null else if (comptime std.mem.eql(u8, method, "startsWith")) std.mem.startsWith(u8, input, needle) else std.mem.endsWith(u8, input, needle) };
+    return .{
+        .bool = if (comptime std.mem.eql(u8, method, "includes")) std.mem.indexOf(u8, input, needle) != null else if (comptime std.mem.eql(u8, method, "startsWith")) std.mem.startsWith(u8, input, needle) else std.mem.endsWith(u8, input, needle),
+    };
 }
 
 pub fn transferCache(a: A, ctx: anytype, policy: OperationPolicy, key: Value, options: Value) !Value {
     var expires: i64 = policy.expires orelse 0;
     var tags: std.array_list.Managed(Value) = .init(a);
-    for (policy.tags) |tag| try tags.append(.{ .string = tag });
+    for (policy.tags) |tag| try tags.append(.{
+        .string = tag,
+    });
     if (options == .object) {
         const ttl = try number(options.object.get("ttl") orelse return error.CacheTTLRequired);
         if (!std.math.isFinite(ttl) or ttl < 0 or ttl > 9007199254740991) return error.InvalidCacheTTL;
@@ -358,7 +431,15 @@ pub fn transferCache(a: A, ctx: anytype, policy: OperationPolicy, key: Value, op
         };
     }
     if (policy.no_store or policy.revalidate) expires = 0;
-    return object(a, &.{ "key", "expires", "tags", "noStore", "revision" }, &.{ key, .{ .integer = expires }, .{ .array = tags }, .{ .bool = policy.no_store }, .{ .integer = @intCast(policy.revision) } });
+    return object(a, &.{ "key", "expires", "tags", "noStore", "revision" }, &.{ key, .{
+        .integer = expires,
+    }, .{
+        .array = tags,
+    }, .{
+        .bool = policy.no_store,
+    }, .{
+        .integer = @intCast(policy.revision),
+    } });
 }
 
 pub fn publishPolicy(ctx: anytype, policy: OperationPolicy) !void {

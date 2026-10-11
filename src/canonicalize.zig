@@ -23,7 +23,11 @@ const err = @import("err.zig");
 const util = @import("util.zig");
 
 /// `[originalOffset, originalLength, replacementLength]`
-pub const Edit = struct { start: usize, original_len: usize, replacement_len: usize };
+pub const Edit = struct {
+    start: usize,
+    original_len: usize,
+    replacement_len: usize,
+};
 
 pub const Result = struct {
     code: []const u8,
@@ -168,12 +172,19 @@ const Canonicalizer = struct {
         try self.out.appendSlice(self.allocator, text);
         self.last = end;
         self.i = end;
-        try self.edits.append(self.allocator, .{ .start = start, .original_len = end - start, .replacement_len = text.len });
+        try self.edits.append(self.allocator, .{
+            .start = start,
+            .original_len = end - start,
+            .replacement_len = text.len,
+        });
     }
 };
 
 pub fn canonicalize(allocator: Allocator, src: []const u8) err.Error!Result {
-    var c = Canonicalizer{ .allocator = allocator, .src = src };
+    var c = Canonicalizer{
+        .allocator = allocator,
+        .src = src,
+    };
 
     while (c.i < src.len) {
         const ch = src[c.i];
@@ -240,7 +251,10 @@ pub fn canonicalize(allocator: Allocator, src: []const u8) err.Error!Result {
     }
 
     try c.out.appendSlice(allocator, src[c.last..]);
-    return .{ .code = try c.out.toOwnedSlice(allocator), .edits = try c.edits.toOwnedSlice(allocator) };
+    return .{
+        .code = try c.out.toOwnedSlice(allocator),
+        .edits = try c.edits.toOwnedSlice(allocator),
+    };
 }
 
 test "canonicalize rewrites directives, events and bindings" {

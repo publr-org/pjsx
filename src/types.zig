@@ -11,13 +11,19 @@ const analyze = @import("analyze.zig");
 const Allocator = std.mem.Allocator;
 const Error = err.Error;
 
-pub const Source = struct { filename: []const u8, code: []const u8 };
+pub const Source = struct {
+    filename: []const u8,
+    code: []const u8,
+};
 pub const Resolver = struct {
     context: *anyopaque,
     load: *const fn (*anyopaque, Allocator, []const u8, []const u8) Error!?Source,
 };
 pub const Kind = enum { string, number, boolean, object, array, tuple, @"union", function, node, style, undefined, null, never, unknown };
-pub const Property = struct { type: *Type, optional: bool = false };
+pub const Property = struct {
+    type: *Type,
+    optional: bool = false,
+};
 pub const Type = struct {
     kind: Kind,
     fields: util.OrderedMap(Property),
@@ -27,7 +33,11 @@ pub const Type = struct {
     rest: bool = false,
     source: []const u8 = "",
 };
-const Module = struct { filename: []const u8, source: []const u8, program: *ast.Node };
+const Module = struct {
+    filename: []const u8,
+    source: []const u8,
+    program: *ast.Node,
+};
 
 pub const Context = struct {
     a: Allocator,
@@ -37,16 +47,29 @@ pub const Context = struct {
     cache: util.OrderedMap(*Type),
 
     pub fn init(a: Allocator, resolver: ?Resolver) Context {
-        return .{ .a = a, .resolver = resolver, .modules = .init(a), .resolving = .init(a), .cache = .init(a) };
+        return .{
+            .a = a,
+            .resolver = resolver,
+            .modules = .init(a),
+            .resolving = .init(a),
+            .cache = .init(a),
+        };
     }
     fn make(c: *Context, kind: Kind) Error!*Type {
         const t = try c.a.create(Type);
-        t.* = .{ .kind = kind, .fields = .init(c.a) };
+        t.* = .{
+            .kind = kind,
+            .fields = .init(c.a),
+        };
         return t;
     }
     fn add(c: *Context, filename: []const u8, source: []const u8, program: *ast.Node) Error!*Module {
         const m = try c.a.create(Module);
-        m.* = .{ .filename = filename, .source = source, .program = program };
+        m.* = .{
+            .filename = filename,
+            .source = source,
+            .program = program,
+        };
         try c.modules.put(filename, m);
         return m;
     }
@@ -150,7 +173,9 @@ pub const Context = struct {
             const t = try c.valueType(m, node.argument.?);
             if (t.literal != null and t.literal.? == .number) {
                 const n = try c.make(.number);
-                n.literal = .{ .number = -t.literal.?.number };
+                n.literal = .{
+                    .number = -t.literal.?.number,
+                };
                 return n;
             }
         }
@@ -161,7 +186,9 @@ pub const Context = struct {
                     result = try c.mergeObjects(result, try c.valueType(m, prop.argument.?), false);
                 } else {
                     const name = try analyze.propertyName(c.a, prop) orelse return err.fail("pjsx: {s}: cannot infer computed constant key", .{m.filename});
-                    try result.fields.put(name, .{ .type = try c.valueType(m, prop.value_node.?) });
+                    try result.fields.put(name, .{
+                        .type = try c.valueType(m, prop.value_node.?),
+                    });
                 }
             }
             return result;
@@ -262,7 +289,12 @@ const TypeParser = struct {
     fn init(c: *Context, m: *Module, source: []const u8) Error!TypeParser {
         var lex = lexer.Lexer.init(c.a, source);
         const t = try lex.next();
-        return .{ .c = c, .m = m, .lex = lex, .t = t };
+        return .{
+            .c = c,
+            .m = m,
+            .lex = lex,
+            .t = t,
+        };
     }
     fn next(p: *TypeParser) Error!void {
         p.t = try p.lex.next();
@@ -327,7 +359,9 @@ const TypeParser = struct {
             var result = try c.make(.never);
             for (object.fields.keys()) |name| {
                 const literal = try c.make(.string);
-                literal.literal = .{ .string = name };
+                literal.literal = .{
+                    .string = name,
+                };
                 result = try c.combine(result, literal);
             }
             return result;
@@ -361,7 +395,10 @@ const TypeParser = struct {
                     const optional = try p.eat("?");
                     try p.expect(":");
                     const value = try p.parseUnion();
-                    try object.fields.put(name, .{ .type = value, .optional = optional });
+                    try object.fields.put(name, .{
+                        .type = value,
+                        .optional = optional,
+                    });
                 }
                 if (!try p.eat(";")) _ = try p.eat(",");
             }
@@ -426,7 +463,13 @@ const TypeParser = struct {
         try p.next();
         if (token.kind == .string or token.kind == .number or token.is("true") or token.is("false")) {
             const t = try c.make(if (token.kind == .string) .string else if (token.kind == .number) .number else .boolean);
-            t.literal = if (token.kind == .string) .{ .string = token.text } else if (token.kind == .number) .{ .number = token.number } else .{ .boolean = token.is("true") };
+            t.literal = if (token.kind == .string) .{
+                .string = token.text,
+            } else if (token.kind == .number) .{
+                .number = token.number,
+            } else .{
+                .boolean = token.is("true"),
+            };
             return t;
         }
         if (token.is("JSX")) {
@@ -512,7 +555,12 @@ fn onlyBoolean(t: *Type) bool {
     return found;
 }
 fn propSpec(c: *Context, t: *Type, optional: bool) Error!analyze.PropSchema {
-    var s = analyze.PropSchema{ .type = .string, .optional = optional or includes(t, .undefined), .typescript = t, .nullable = includes(t, .null) };
+    var s = analyze.PropSchema{
+        .type = .string,
+        .optional = optional or includes(t, .undefined),
+        .typescript = t,
+        .nullable = includes(t, .null),
+    };
     var core = t;
     if (t.kind == .@"union") {
         var values: std.ArrayList(analyze.Primitive) = .empty;
@@ -612,14 +660,20 @@ pub fn assertedArray(a: Allocator, program: *ast.Node, source: []const u8, filen
     return propSpec(&c, t, false) catch null;
 }
 
-pub const InferredProps = struct { schema: *analyze.Schema, contract: *Type };
+pub const InferredProps = struct {
+    schema: *analyze.Schema,
+    contract: *Type,
+};
 
 pub fn infer(a: Allocator, program: *ast.Node, source: []const u8, filename: []const u8, function: *ast.Node, resolver: ?Resolver) Error!InferredProps {
     var c = Context.init(a, resolver);
     const m = try c.add(filename, source, program);
     if (function.params.len == 0) {
         const contract = try c.make(.object);
-        return .{ .schema = try objectSchema(&c, contract), .contract = contract };
+        return .{
+            .schema = try objectSchema(&c, contract),
+            .contract = contract,
+        };
     }
     const param = function.params[0];
     const pattern = if (param.type == .AssignmentPattern) param.left.? else param;
@@ -634,7 +688,10 @@ pub fn infer(a: Allocator, program: *ast.Node, source: []const u8, filename: []c
             if (binding.type != .AssignmentPattern) return err.fail("pjsx: {s}.{s}: add a TypeScript prop annotation or an inferable default", .{ filename, name });
             const inferred = try c.valueType(m, binding.right.?);
             inferred.literal = null; // Normal mutable parameter inference widens literals.
-            try contract.fields.put(name, .{ .type = inferred, .optional = true });
+            try contract.fields.put(name, .{
+                .type = inferred,
+                .optional = true,
+            });
         }
     } else return err.fail("pjsx: {s}: component props need a TypeScript annotation", .{filename});
     const schema = try objectSchema(&c, try c.object(contract));
@@ -645,10 +702,15 @@ pub fn infer(a: Allocator, program: *ast.Node, source: []const u8, filename: []c
         var s = schema.get(name) orelse continue;
         const value = analyze.unwrap(binding.right.?);
         s.default_expression = value;
-        s.default = if (value.type == .Literal) analyze.Primitive.fromLiteral(value.value) else if (value.type == .UnaryExpression and util.eql(value.operator, "-") and value.argument.?.type == .Literal and value.argument.?.value == .number) .{ .number = -value.argument.?.value.number } else null;
+        s.default = if (value.type == .Literal) analyze.Primitive.fromLiteral(value.value) else if (value.type == .UnaryExpression and util.eql(value.operator, "-") and value.argument.?.type == .Literal and value.argument.?.value == .number) .{
+            .number = -value.argument.?.value.number,
+        } else null;
         try schema.put(name, s);
     };
-    return .{ .schema = schema, .contract = contract };
+    return .{
+        .schema = schema,
+        .contract = contract,
+    };
 }
 
 /// Publr JSX guards: booleans test true; optional non-booleans test presence.
@@ -664,7 +726,9 @@ pub fn annotateGuards(a: Allocator, program: *ast.Node, source: []const u8, file
     if (contract.kind != .object and contract.kind != .@"union") return;
     const object = try c.object(contract);
     var bindings = util.OrderedMap(Property).init(a);
-    try bindPattern(&c, pattern, .{ .type = object }, &bindings);
+    try bindPattern(&c, pattern, .{
+        .type = object,
+    }, &bindings);
     try annotateGuardNodes(&c, m, function.body.?, &bindings);
 }
 
@@ -684,16 +748,22 @@ fn bindPattern(c: *Context, pattern: *ast.Node, property: Property, bindings: *u
     } else if (pattern.type == .ObjectPattern) {
         for (pattern.properties) |field| {
             if (field.type == .RestElement) {
-                try bindPattern(c, field.argument.?, .{ .type = try c.make(.unknown) }, bindings);
+                try bindPattern(c, field.argument.?, .{
+                    .type = try c.make(.unknown),
+                }, bindings);
                 continue;
             }
             const name = try analyze.propertyName(c.a, field) orelse continue;
-            const member = property.type.fields.get(name) orelse Property{ .type = try c.make(.unknown) };
+            const member = property.type.fields.get(name) orelse Property{
+                .type = try c.make(.unknown),
+            };
             try bindPattern(c, field.value_node.?, member, bindings);
         }
     } else if (pattern.type == .ArrayPattern) {
         for (pattern.elements) |element| if (element) |value| {
-            try bindPattern(c, value, .{ .type = try c.make(.unknown) }, bindings);
+            try bindPattern(c, value, .{
+                .type = try c.make(.unknown),
+            }, bindings);
         };
     }
 }
@@ -705,18 +775,24 @@ fn bindingForExpression(c: *Context, raw: *ast.Node, bindings: *const util.Order
         const base = try bindingForExpression(c, node.object.?, bindings) orelse return null;
         const name = if (!node.computed and node.property.?.type == .Identifier) node.property.?.name else if (node.property.?.type == .Literal and node.property.?.value == .string) node.property.?.value.string else return null;
         if (util.eql(name, "length") and (base.type.kind == .array or base.type.kind == .tuple or base.type.kind == .string))
-            return .{ .type = try c.make(.number) };
+            return .{
+                .type = try c.make(.number),
+            };
         if (base.type.kind != .object) return null;
         return base.type.fields.get(name);
     }
-    if (node.type == .UnaryExpression and util.eql(node.operator, "!")) return .{ .type = try c.make(.boolean) };
+    if (node.type == .UnaryExpression and util.eql(node.operator, "!")) return .{
+        .type = try c.make(.boolean),
+    };
     if (node.type == .Literal) {
         if (analyze.Primitive.fromLiteral(node.value)) |literal| {
-            return .{ .type = try c.make(switch (literal) {
-                .string => .string,
-                .number => .number,
-                .boolean => .boolean,
-            }) };
+            return .{
+                .type = try c.make(switch (literal) {
+                    .string => .string,
+                    .number => .number,
+                    .boolean => .boolean,
+                }),
+            };
         }
     }
     return null;
@@ -751,11 +827,17 @@ fn annotateGuardNodes(c: *Context, m: *Module, node: *ast.Node, bindings: *util.
         if (node.init) |value| try annotateGuardNodes(c, m, value, bindings);
         const pattern = node.id orelse return;
         const property: Property = if (pattern.type_annotation) |annotation|
-            .{ .type = try c.textType(m, annotation.slice(m.source)) }
+            .{
+                .type = try c.textType(m, annotation.slice(m.source)),
+            }
         else if (node.init) |value|
-            try bindingForExpression(c, value, bindings) orelse .{ .type = try c.make(.unknown) }
+            try bindingForExpression(c, value, bindings) orelse .{
+                .type = try c.make(.unknown),
+            }
         else
-            .{ .type = try c.make(.unknown) };
+            .{
+                .type = try c.make(.unknown),
+            };
         try bindPattern(c, pattern, property, bindings);
         return;
     }
@@ -767,7 +849,9 @@ fn annotateGuardNodes(c: *Context, m: *Module, node: *ast.Node, bindings: *util.
             const item = if (collection) |value| value.type.item else null;
             for (callback.params, 0..) |parameter, i| {
                 const inferred = if (i == 0) item orelse try c.make(.unknown) else try c.make(.number);
-                try bindPattern(c, parameter, .{ .type = inferred }, &scope);
+                try bindPattern(c, parameter, .{
+                    .type = inferred,
+                }, &scope);
             }
             if (callback.body) |body| try annotateGuardNodes(c, m, body, &scope);
             return;
@@ -779,7 +863,9 @@ fn annotateGuardNodes(c: *Context, m: *Module, node: *ast.Node, bindings: *util.
         for (node.params) |parameter| {
             const pattern = if (parameter.type == .AssignmentPattern) parameter.left.? else parameter;
             const contract = if (pattern.type_annotation) |annotation| try c.textType(m, annotation.slice(m.source)) else try c.make(.unknown);
-            try bindPattern(c, parameter, .{ .type = contract }, &scope);
+            try bindPattern(c, parameter, .{
+                .type = contract,
+            }, &scope);
         }
         if (node.body) |body| try annotateGuardNodes(c, m, body, &scope);
         return;

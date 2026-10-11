@@ -8,22 +8,46 @@ const Node = ast.Node;
 const A = std.mem.Allocator;
 const S = []const u8;
 const Kind = enum { ordinary, intrinsic, namespace, helper, row, repeat_index, operation, state, derived, awaited };
-const Binding = struct { kind: Kind = .ordinary, name: S = "" };
+const Binding = struct {
+    kind: Kind = .ordinary,
+    name: S = "",
+};
 const Env = std.StringHashMap(Binding);
-const Edit = struct { node: *Node, text: S };
+const Edit = struct {
+    node: *Node,
+    text: S,
+};
 
-pub const Declaration = struct { start: usize, name: S, kind: S };
+pub const Declaration = struct {
+    start: usize,
+    name: S,
+    kind: S,
+};
 pub fn inspect(a: A, source: S, filename: S) err.Error![]const Declaration {
     const program = try parser.parse(a, source, filename);
-    var t = Transform{ .a = a, .source = source, .runtime = "$$publr", .filename = filename };
+    var t = Transform{
+        .a = a,
+        .source = source,
+        .runtime = "$$publr",
+        .filename = filename,
+    };
     var env = Env.init(a);
     _ = try t.emit(program, &env);
     return t.declarations.items;
 }
-pub const Options = struct { runtime_import: S = "publr/runtime", html: bool = false };
+pub const Options = struct {
+    runtime_import: S = "publr/runtime",
+    html: bool = false,
+};
 pub fn compile(a: A, source: S, filename: S, options: Options) err.Error!S {
     const program = try parser.parse(a, source, filename);
-    var t = Transform{ .a = a, .source = source, .runtime = "$$publr", .filename = filename, .html = options.html };
+    var t = Transform{
+        .a = a,
+        .source = source,
+        .runtime = "$$publr",
+        .filename = filename,
+        .html = options.html,
+    };
     var index: usize = 0;
     while (std.mem.indexOf(u8, source, t.runtime) != null) : (index += 1)
         t.runtime = try std.fmt.allocPrint(a, "$$publr{d}", .{index});
@@ -70,7 +94,10 @@ const Transform = struct {
                 const is_publr = node.import_kind != .type and spec.import_kind != .type and util.eql(node.source.?.stringValue() orelse "", "publr");
                 const imported = if (spec.imported) |i| i.name else "";
                 const kind: Kind = if (std.mem.endsWith(u8, node.source.?.stringValue() orelse "", ".zig")) .operation else if (!is_publr) .ordinary else if (spec.type == .ImportNamespaceSpecifier) .namespace else if (intrinsic(imported)) .intrinsic else if (isHelper(imported)) .helper else .ordinary;
-                try env.put(name, .{ .kind = kind, .name = if (kind == .operation) try endpoint(self.a, self.filename, node.source.?.stringValue().?, imported) else imported });
+                try env.put(name, .{
+                    .kind = kind,
+                    .name = if (kind == .operation) try endpoint(self.a, self.filename, node.source.?.stringValue().?, imported) else imported,
+                });
             }
         }
     }
@@ -106,8 +133,14 @@ const Transform = struct {
             if (d.id.?.type != .Identifier) return fail(d, "reactive declarations require a single identifier; destructure a snapshot separately");
             if (kind == .state and declaration.kind != .let) return fail(d, "state declarations require let");
             if (kind != .state and declaration.kind != .@"const") return fail(d, "derived and awaited declarations require const");
-            try env.put(d.id.?.name, .{ .kind = kind });
-            try self.declarations.append(self.a, .{ .start = d.start, .name = d.id.?.name, .kind = name });
+            try env.put(d.id.?.name, .{
+                .kind = kind,
+            });
+            try self.declarations.append(self.a, .{
+                .start = d.start,
+                .name = d.id.?.name,
+                .kind = name,
+            });
         }
     }
     fn reactiveBinding(node: *Node, env: *Env) ?Kind {
@@ -130,15 +163,30 @@ const Transform = struct {
     fn patternCode(self: *Transform, node: *Node, env: *Env) err.Error!S {
         if (node.type == .Identifier) return node.slice(self.source);
         if (node.type == .AssignmentPattern) return self.splice(node, &.{
-            .{ .node = node.left.?, .text = try self.patternCode(node.left.?, env) },
-            .{ .node = node.right.?, .text = try self.emit(node.right.?, env) },
+            .{
+                .node = node.left.?,
+                .text = try self.patternCode(node.left.?, env),
+            },
+            .{
+                .node = node.right.?,
+                .text = try self.emit(node.right.?, env),
+            },
         });
-        if (node.type == .Property and !node.computed) return self.splice(node, &.{.{ .node = node.value_node.?, .text = try self.patternCode(node.value_node.?, env) }});
+        if (node.type == .Property and !node.computed) return self.splice(node, &.{.{
+            .node = node.value_node.?,
+            .text = try self.patternCode(node.value_node.?, env),
+        }});
         var edits: std.ArrayList(Edit) = .empty;
         for (ast.childFields(node.type)) |field| {
             if (field[1]) {
-                for (ast.getList(node, field[0])) |child| if (child) |c| try edits.append(self.a, .{ .node = c, .text = try self.patternCode(c, env) });
-            } else if (ast.getSingle(node, field[0])) |child| try edits.append(self.a, .{ .node = child, .text = try self.patternCode(child, env) });
+                for (ast.getList(node, field[0])) |child| if (child) |c| try edits.append(self.a, .{
+                    .node = c,
+                    .text = try self.patternCode(c, env),
+                });
+            } else if (ast.getSingle(node, field[0])) |child| try edits.append(self.a, .{
+                .node = child,
+                .text = try self.patternCode(child, env),
+            });
         }
         return self.splice(node, edits.items);
     }
@@ -149,10 +197,16 @@ const Transform = struct {
             for (node.params) |parameter| try self.pattern(parameter, &local);
             var changes: std.ArrayList(Edit) = .empty;
             for (node.params) |parameter| {
-                try changes.append(self.a, .{ .node = parameter, .text = try self.patternCode(parameter, &local) });
+                try changes.append(self.a, .{
+                    .node = parameter,
+                    .text = try self.patternCode(parameter, &local),
+                });
             }
             if (node.body) |body| try self.hoist(body, &local);
-            if (node.body) |body| try changes.append(self.a, .{ .node = body, .text = try self.emit(body, &local) });
+            if (node.body) |body| try changes.append(self.a, .{
+                .node = body,
+                .text = try self.emit(body, &local),
+            });
             return self.splice(node, changes.items);
         }
         if (node.type == .Program) try self.hoist(node, &local);
@@ -173,7 +227,10 @@ const Transform = struct {
             for (node.statements) |statement| {
                 const code = try self.emit(statement, &local);
                 const replacement = if (statement.type == .ReturnStatement) try std.fmt.allocPrint(self.a, "{s}.captureActions({{{s}}});\n{s}", .{ self.runtime, try util.join(self.a, actions.items, ","), code }) else code;
-                try changes.append(self.a, .{ .node = statement, .text = replacement });
+                try changes.append(self.a, .{
+                    .node = statement,
+                    .text = replacement,
+                });
             }
             self.used = true;
             return self.splice(node, changes.items);
@@ -242,7 +299,10 @@ const Transform = struct {
             return self.children(node, &local);
         }
         if ((node.type == .MethodDefinition or node.type == .PropertyDefinition) and !node.computed) {
-            if (node.value_node) |value| return self.splice(node, &.{.{ .node = value, .text = try self.emit(value, env) }});
+            if (node.value_node) |value| return self.splice(node, &.{.{
+                .node = value,
+                .text = try self.emit(value, env),
+            }});
             return node.slice(self.source);
         }
         if (node.type == .VariableDeclarator) return self.emitDeclaration(node, env);
@@ -266,13 +326,19 @@ const Transform = struct {
                 }
             }
             if (node.computed) return self.children(node, env);
-            return self.splice(node, &.{.{ .node = object, .text = try self.emit(object, env) }});
+            return self.splice(node, &.{.{
+                .node = object,
+                .text = try self.emit(object, env),
+            }});
         }
         if (node.type == .Property and !node.computed) {
             const value = node.value_node.?;
             if (node.shorthand and reactiveBinding(value, env) != null)
                 return std.fmt.allocPrint(self.a, "{s}: {s}", .{ node.key.?.slice(self.source), try self.emit(value, env) });
-            return self.splice(node, &.{.{ .node = value, .text = try self.emit(value, env) }});
+            return self.splice(node, &.{.{
+                .node = value,
+                .text = try self.emit(value, env),
+            }});
         }
         if (node.type == .CatchClause or node.type == .ForStatement or node.type == .ForOfStatement or node.type == .ForInStatement) {
             var local = try env.clone();
@@ -355,7 +421,9 @@ const Transform = struct {
         var local = try env.clone();
         for (cb.params) |param| {
             if (param.type != .Identifier) return fail(param, "iteration callbacks require identifier parameters");
-            try local.put(param.name, .{ .kind = if (util.eql(name, "For")) .row else .repeat_index });
+            try local.put(param.name, .{
+                .kind = if (util.eql(name, "For")) .row else .repeat_index,
+            });
         }
         const body = try self.emit(cb.body.?, &local);
         var params: util.StringList = .empty;
@@ -399,11 +467,20 @@ const Transform = struct {
                 };
             }
             const text = if (util.eql(name, "state")) try std.fmt.allocPrint(self.a, "{s}.state({s}, {s})", .{ self.runtime, wrapped, id }) else if (util.eql(name, "awaited")) try std.fmt.allocPrint(self.a, "{s}.awaited({s}, {{ id: {s}, inputs: {s}{s}{s} }})", .{ self.runtime, wrapped, id, inputs, cache, identity }) else try std.fmt.allocPrint(self.a, "{s}.{s}({s}, {s})", .{ self.runtime, name, wrapped, id });
-            return self.splice(node, &.{.{ .node = raw, .text = text }});
+            return self.splice(node, &.{.{
+                .node = raw,
+                .text = text,
+            }});
         }
         return self.splice(node, &.{
-            .{ .node = node.id.?, .text = try self.patternCode(node.id.?, env) },
-            .{ .node = raw, .text = try self.emit(raw, env) },
+            .{
+                .node = node.id.?,
+                .text = try self.patternCode(node.id.?, env),
+            },
+            .{
+                .node = raw,
+                .text = try self.emit(raw, env),
+            },
         });
     }
     fn metadata(self: *Transform, node: *Node, name: S, env: *Env) err.Error!S {
@@ -459,10 +536,16 @@ const Transform = struct {
                     else
                         try self.emit(c, env);
                     const wrapped = if ((node.type == .JSXElement or node.type == .JSXFragment) and helperName(c, env) != null) try std.fmt.allocPrint(self.a, "{{{s}}}", .{code}) else code;
-                    try edits.append(self.a, .{ .node = c, .text = wrapped });
+                    try edits.append(self.a, .{
+                        .node = c,
+                        .text = wrapped,
+                    });
                 };
             } else if (ast.getSingle(node, field[0])) |child|
-                try edits.append(self.a, .{ .node = child, .text = try self.emit(child, env) });
+                try edits.append(self.a, .{
+                    .node = child,
+                    .text = try self.emit(child, env),
+                });
         }
         return self.splice(node, edits.items);
     }

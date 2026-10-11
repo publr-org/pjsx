@@ -8,7 +8,11 @@ const Expr = compiler.ExpressionIR;
 const Node = compiler.NodeIR;
 
 pub fn emit(a: std.mem.Allocator, p: *const portable.Program, _: portable.Options) Error![]const u8 {
-    var e = Emitter{ .a = a, .p = p, .out = .init(a) };
+    var e = Emitter{
+        .a = a,
+        .p = p,
+        .out = .init(a),
+    };
     const w = &e.out.writer;
     try w.writeAll(@embedFile("php/runtime.php"));
     try w.writeAll("\nnamespace {\nuse Publr\\Portable\\V1 as R;\nreturn static function(array $props): string {\n");
@@ -48,7 +52,10 @@ const Emitter = struct {
     a: std.mem.Allocator,
     p: *const portable.Program,
     out: std.Io.Writer.Allocating,
-    parameters: std.ArrayList(struct { name: []const u8, code: []const u8 }) = .empty,
+    parameters: std.ArrayList(struct {
+        name: []const u8,
+        code: []const u8,
+    }) = .empty,
     counter: usize = 0,
 
     fn quote(e: *Emitter, s: []const u8) Error![]const u8 {
@@ -162,7 +169,10 @@ const Emitter = struct {
                     if (i != 0) try w.writeAll(", ");
                     e.counter += 1;
                     const name = try util.fmt(e.a, "$arg{d}", .{e.counter});
-                    try e.parameters.append(e.a, .{ .name = parameter, .code = name });
+                    try e.parameters.append(e.a, .{
+                        .name = parameter,
+                        .code = name,
+                    });
                     try w.writeAll(name);
                 }
                 try w.writeAll(") use ($props");

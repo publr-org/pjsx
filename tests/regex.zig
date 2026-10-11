@@ -14,12 +14,18 @@ const Op = union(enum) {
     char: u8,
     any,
     class: Class,
-    split: struct { primary: usize, secondary: usize },
+    split: struct {
+        primary: usize,
+        secondary: usize,
+    },
     jmp: usize,
     bol,
     eol,
     word_boundary: bool, // true = \b, false = \B
-    lookahead: struct { body: usize, next: usize },
+    lookahead: struct {
+        body: usize,
+        next: usize,
+    },
     match,
 };
 
@@ -59,13 +65,20 @@ const Compiler = struct {
         var splits: std.ArrayList(usize) = .empty;
         var jumps: std.ArrayList(usize) = .empty;
         while (true) {
-            const split_at = try self.emit(.{ .split = .{ .primary = 0, .secondary = 0 } });
+            const split_at = try self.emit(.{
+                .split = .{
+                    .primary = 0,
+                    .secondary = 0,
+                },
+            });
             try splits.append(self.allocator, split_at);
             self.code.items[split_at].split.primary = self.code.items.len;
             try self.compileSequence();
             if (self.peek() == '|') {
                 self.pos += 1;
-                const jump_at = try self.emit(.{ .jmp = 0 });
+                const jump_at = try self.emit(.{
+                    .jmp = 0,
+                });
                 try jumps.append(self.allocator, jump_at);
                 self.code.items[split_at].split.secondary = self.code.items.len;
             } else {
@@ -98,7 +111,12 @@ const Compiler = struct {
                     if (kind == '=') lookahead = true else if (kind != ':') return error.UnsupportedGroup;
                 }
                 if (lookahead) {
-                    const la = try self.emit(.{ .lookahead = .{ .body = 0, .next = 0 } });
+                    const la = try self.emit(.{
+                        .lookahead = .{
+                            .body = 0,
+                            .next = 0,
+                        },
+                    });
                     self.code.items[la].lookahead.body = self.code.items.len;
                     try self.compileAlternation();
                     _ = try self.emit(.match);
@@ -114,25 +132,50 @@ const Compiler = struct {
                 if (self.dotall) {
                     _ = try self.emit(.any);
                 } else {
-                    _ = try self.emit(.{ .class = .{ .negated = true, .ranges = &.{.{ '\n', '\n' }} } });
+                    _ = try self.emit(.{
+                        .class = .{
+                            .negated = true,
+                            .ranges = &.{.{ '\n', '\n' }},
+                        },
+                    });
                 }
             },
             '^' => _ = try self.emit(.bol),
             '$' => _ = try self.emit(.eol),
             '\\' => try self.compileEscape(false),
-            else => _ = try self.emit(.{ .char = c }),
+            else => _ = try self.emit(.{
+                .char = c,
+            }),
         }
         try self.compileQuantifier(start);
     }
 
     fn escapeClass(c: u8) ?Class {
         return switch (c) {
-            's' => .{ .negated = false, .ranges = &.{ .{ ' ', ' ' }, .{ '\t', '\r' } } },
-            'S' => .{ .negated = true, .ranges = &.{ .{ ' ', ' ' }, .{ '\t', '\r' } } },
-            'd' => .{ .negated = false, .ranges = &.{.{ '0', '9' }} },
-            'D' => .{ .negated = true, .ranges = &.{.{ '0', '9' }} },
-            'w' => .{ .negated = false, .ranges = &.{ .{ 'a', 'z' }, .{ 'A', 'Z' }, .{ '0', '9' }, .{ '_', '_' } } },
-            'W' => .{ .negated = true, .ranges = &.{ .{ 'a', 'z' }, .{ 'A', 'Z' }, .{ '0', '9' }, .{ '_', '_' } } },
+            's' => .{
+                .negated = false,
+                .ranges = &.{ .{ ' ', ' ' }, .{ '\t', '\r' } },
+            },
+            'S' => .{
+                .negated = true,
+                .ranges = &.{ .{ ' ', ' ' }, .{ '\t', '\r' } },
+            },
+            'd' => .{
+                .negated = false,
+                .ranges = &.{.{ '0', '9' }},
+            },
+            'D' => .{
+                .negated = true,
+                .ranges = &.{.{ '0', '9' }},
+            },
+            'w' => .{
+                .negated = false,
+                .ranges = &.{ .{ 'a', 'z' }, .{ 'A', 'Z' }, .{ '0', '9' }, .{ '_', '_' } },
+            },
+            'W' => .{
+                .negated = true,
+                .ranges = &.{ .{ 'a', 'z' }, .{ 'A', 'Z' }, .{ '0', '9' }, .{ '_', '_' } },
+            },
             else => null,
         };
     }
@@ -152,18 +195,26 @@ const Compiler = struct {
         const c = self.pattern[self.pos];
         self.pos += 1;
         if (!in_class and c == 'b') {
-            _ = try self.emit(.{ .word_boundary = true });
+            _ = try self.emit(.{
+                .word_boundary = true,
+            });
             return;
         }
         if (!in_class and c == 'B') {
-            _ = try self.emit(.{ .word_boundary = false });
+            _ = try self.emit(.{
+                .word_boundary = false,
+            });
             return;
         }
         if (escapeClass(c)) |class| {
-            _ = try self.emit(.{ .class = class });
+            _ = try self.emit(.{
+                .class = class,
+            });
             return;
         }
-        _ = try self.emit(.{ .char = escapeChar(c) });
+        _ = try self.emit(.{
+            .char = escapeChar(c),
+        });
     }
 
     fn compileClass(self: *Compiler) CompileError!void {
@@ -203,7 +254,12 @@ const Compiler = struct {
             try ranges.append(self.allocator, .{ lo, hi });
         }
         self.pos += 1; // ]
-        _ = try self.emit(.{ .class = .{ .negated = negated, .ranges = try ranges.toOwnedSlice(self.allocator) } });
+        _ = try self.emit(.{
+            .class = .{
+                .negated = negated,
+                .ranges = try ranges.toOwnedSlice(self.allocator),
+            },
+        });
     }
 
     fn compileQuantifier(self: *Compiler, start: usize) CompileError!void {
@@ -248,20 +304,44 @@ const Compiler = struct {
         if (max) |m| {
             // Optional repetitions: (atom)? repeated (m - min) times.
             for (0..m - min) |_| {
-                const split_at = try self.emit(.{ .split = .{ .primary = 0, .secondary = 0 } });
+                const split_at = try self.emit(.{
+                    .split = .{
+                        .primary = 0,
+                        .secondary = 0,
+                    },
+                });
                 const body = self.code.items.len;
                 try self.appendAtom(atom, start);
                 const after = self.code.items.len;
-                self.code.items[split_at].split = if (lazy) .{ .primary = after, .secondary = body } else .{ .primary = body, .secondary = after };
+                self.code.items[split_at].split = if (lazy) .{
+                    .primary = after,
+                    .secondary = body,
+                } else .{
+                    .primary = body,
+                    .secondary = after,
+                };
             }
         } else {
             // Star loop.
-            const split_at = try self.emit(.{ .split = .{ .primary = 0, .secondary = 0 } });
+            const split_at = try self.emit(.{
+                .split = .{
+                    .primary = 0,
+                    .secondary = 0,
+                },
+            });
             const body = self.code.items.len;
             try self.appendAtom(atom, start);
-            _ = try self.emit(.{ .jmp = split_at });
+            _ = try self.emit(.{
+                .jmp = split_at,
+            });
             const after = self.code.items.len;
-            self.code.items[split_at].split = if (lazy) .{ .primary = after, .secondary = body } else .{ .primary = body, .secondary = after };
+            self.code.items[split_at].split = if (lazy) .{
+                .primary = after,
+                .secondary = body,
+            } else .{
+                .primary = body,
+                .secondary = after,
+            };
         }
     }
 
@@ -270,9 +350,21 @@ const Compiler = struct {
         const delta: isize = @as(isize, @intCast(self.code.items.len)) - @as(isize, @intCast(original_start));
         for (atom) |op| {
             const relocated: Op = switch (op) {
-                .split => |s| .{ .split = .{ .primary = reloc(s.primary, delta), .secondary = reloc(s.secondary, delta) } },
-                .jmp => |target| .{ .jmp = reloc(target, delta) },
-                .lookahead => |l| .{ .lookahead = .{ .body = reloc(l.body, delta), .next = reloc(l.next, delta) } },
+                .split => |s| .{
+                    .split = .{
+                        .primary = reloc(s.primary, delta),
+                        .secondary = reloc(s.secondary, delta),
+                    },
+                },
+                .jmp => |target| .{
+                    .jmp = reloc(target, delta),
+                },
+                .lookahead => |l| .{
+                    .lookahead = .{
+                        .body = reloc(l.body, delta),
+                        .next = reloc(l.next, delta),
+                    },
+                },
                 else => op,
             };
             _ = try self.emit(relocated);
@@ -288,11 +380,17 @@ pub const Regex = struct {
     code: []const Op,
 
     pub fn compile(allocator: Allocator, pattern: []const u8, flags: []const u8) CompileError!Regex {
-        var compiler = Compiler{ .allocator = allocator, .pattern = pattern, .dotall = std.mem.indexOfScalar(u8, flags, 's') != null };
+        var compiler = Compiler{
+            .allocator = allocator,
+            .pattern = pattern,
+            .dotall = std.mem.indexOfScalar(u8, flags, 's') != null,
+        };
         try compiler.compileAlternation();
         if (compiler.pos != pattern.len) return error.TrailingPattern;
         _ = try compiler.emit(.match);
-        return .{ .code = try compiler.code.toOwnedSlice(allocator) };
+        return .{
+            .code = try compiler.code.toOwnedSlice(allocator),
+        };
     }
 
     fn isWord(c: u8) bool {

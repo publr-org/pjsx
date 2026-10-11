@@ -69,17 +69,29 @@ pub const Primitive = union(enum) {
 
     pub fn toJs(self: Primitive) js.Value {
         return switch (self) {
-            .string => |s| .{ .string = s },
-            .boolean => |b| .{ .boolean = b },
-            .number => |n| .{ .number = n },
+            .string => |s| .{
+                .string = s,
+            },
+            .boolean => |b| .{
+                .boolean = b,
+            },
+            .number => |n| .{
+                .number = n,
+            },
         };
     }
 
     pub fn fromLiteral(literal: ast.LiteralValue) ?Primitive {
         return switch (literal) {
-            .string => |s| .{ .string = s },
-            .boolean => |b| .{ .boolean = b },
-            .number => |n| .{ .number = n },
+            .string => |s| .{
+                .string = s,
+            },
+            .boolean => |b| .{
+                .boolean = b,
+            },
+            .number => |n| .{
+                .number = n,
+            },
             else => null,
         };
     }
@@ -121,9 +133,16 @@ pub const PropSchema = struct {
 
 pub const Schema = OrderedMap(PropSchema);
 
-pub const RefBinding = struct { name: []const u8, access: []const u8 };
+pub const RefBinding = struct {
+    name: []const u8,
+    access: []const u8,
+};
 
-pub const SeedAssignment = struct { field: []const u8, value: *Node, statement: *Node };
+pub const SeedAssignment = struct {
+    field: []const u8,
+    value: *Node,
+    statement: *Node,
+};
 
 /// Component-local reactive state (`const state = Publr.reactive({...})`).
 /// The `foreign` / `family_*` fields are the family-wire extension server
@@ -268,9 +287,13 @@ pub fn parseSchema(allocator: Allocator, node: *Node, label: []const u8) Error!*
         const default_value: ?Primitive = if (definition.has("default"))
             try literalValue(allocator, definition.get("default"), try util.fmt(allocator, "{s}.default", .{field_label}))
         else if (prop_type == .boolean)
-            .{ .boolean = false }
+            .{
+                .boolean = false,
+            }
         else if (prop_type == .string and optional)
-            .{ .string = "" }
+            .{
+                .string = "",
+            }
         else
             null;
         const allowed_values: ?[]const Primitive = if (definition.get("values")) |values|
@@ -349,7 +372,10 @@ fn findReturnJsx(body: *Node) ?*Node {
 
 const Environment = OrderedMap(*Node);
 
-const PrivateComponent = struct { fn_node: *Node, root: *Node };
+const PrivateComponent = struct {
+    fn_node: *Node,
+    root: *Node,
+};
 const PrivateComponents = OrderedMap(PrivateComponent);
 
 fn literalNode(allocator: Allocator, value: js.Value, source: ?*const Node) Allocator.Error!*Node {
@@ -359,17 +385,26 @@ fn literalNode(allocator: Allocator, value: js.Value, source: ?*const Node) Allo
     return node;
 }
 
-const MemberKey = union(enum) { name: []const u8, index: f64 };
+const MemberKey = union(enum) {
+    name: []const u8,
+    index: f64,
+};
 
 fn configuredMemberName(allocator: Allocator, node: *const Node) Allocator.Error!?MemberKey {
     if (!node.computed and node.property != null and node.property.?.type == .Identifier) {
-        return .{ .name = node.property.?.name };
+        return .{
+            .name = node.property.?.name,
+        };
     }
     const property = if (node.property) |p| unwrap(p) else return null;
     if (property.type == .Literal) {
         switch (property.value) {
-            .string => |s| return .{ .name = s },
-            .number => |n| return .{ .index = n },
+            .string => |s| return .{
+                .name = s,
+            },
+            .number => |n| return .{
+                .index = n,
+            },
             else => {},
         }
     }
@@ -390,20 +425,33 @@ fn configuredObjectField(allocator: Allocator, node: *Node, key: []const u8) All
     return null;
 }
 
-const Known = struct { known: bool, value: js.Value = .undefined };
+const Known = struct {
+    known: bool,
+    value: js.Value = .undefined,
+};
 
 fn configuredPrimitive(node: *Node) Known {
     const value = unwrap(node);
-    if (value.type == .Literal) return .{ .known = true, .value = js.Value.fromLiteral(value.value) };
-    if (value.isIdentifier("undefined")) return .{ .known = true, .value = .undefined };
-    return .{ .known = false };
+    if (value.type == .Literal) return .{
+        .known = true,
+        .value = js.Value.fromLiteral(value.value),
+    };
+    if (value.isIdentifier("undefined")) return .{
+        .known = true,
+        .value = .undefined,
+    };
+    return .{
+        .known = false,
+    };
 }
 
 fn foldConfiguredExpression(allocator: Allocator, node: *Node) Error!*Node {
     const value = unwrap(node);
     if (value.type == .UnaryExpression and util.eql(value.operator, "!")) {
         const argument = configuredPrimitive(value.argument.?);
-        if (argument.known) return literalNode(allocator, .{ .boolean = !argument.value.truthy() }, value);
+        if (argument.known) return literalNode(allocator, .{
+            .boolean = !argument.value.truthy(),
+        }, value);
     }
     if (value.type == .BinaryExpression or value.type == .LogicalExpression) {
         const left = configuredPrimitive(value.left.?);
@@ -418,16 +466,34 @@ fn foldConfiguredExpression(allocator: Allocator, node: *Node) Error!*Node {
             const l = left.value;
             const r = right.value;
             const op = value.operator;
-            if (util.eql(op, "===")) return literalNode(allocator, .{ .boolean = js.Value.strictEquals(l, r) }, value);
-            if (util.eql(op, "!==")) return literalNode(allocator, .{ .boolean = !js.Value.strictEquals(l, r) }, value);
-            if (util.eql(op, "==")) return literalNode(allocator, .{ .boolean = js.Value.looseEquals(l, r) }, value);
-            if (util.eql(op, "!=")) return literalNode(allocator, .{ .boolean = !js.Value.looseEquals(l, r) }, value);
+            if (util.eql(op, "===")) return literalNode(allocator, .{
+                .boolean = js.Value.strictEquals(l, r),
+            }, value);
+            if (util.eql(op, "!==")) return literalNode(allocator, .{
+                .boolean = !js.Value.strictEquals(l, r),
+            }, value);
+            if (util.eql(op, "==")) return literalNode(allocator, .{
+                .boolean = js.Value.looseEquals(l, r),
+            }, value);
+            if (util.eql(op, "!=")) return literalNode(allocator, .{
+                .boolean = !js.Value.looseEquals(l, r),
+            }, value);
             if (util.eql(op, "+")) return literalNode(allocator, try js.Value.add(l, r, allocator), value);
-            if (util.eql(op, "-")) return literalNode(allocator, .{ .number = l.toNumber() - r.toNumber() }, value);
-            if (util.eql(op, "<")) return literalNode(allocator, .{ .boolean = js.Value.lessThan(l, r) }, value);
-            if (util.eql(op, "<=")) return literalNode(allocator, .{ .boolean = js.Value.lessThanOrEqual(l, r) }, value);
-            if (util.eql(op, ">")) return literalNode(allocator, .{ .boolean = js.Value.lessThan(r, l) }, value);
-            if (util.eql(op, ">=")) return literalNode(allocator, .{ .boolean = js.Value.lessThanOrEqual(r, l) }, value);
+            if (util.eql(op, "-")) return literalNode(allocator, .{
+                .number = l.toNumber() - r.toNumber(),
+            }, value);
+            if (util.eql(op, "<")) return literalNode(allocator, .{
+                .boolean = js.Value.lessThan(l, r),
+            }, value);
+            if (util.eql(op, "<=")) return literalNode(allocator, .{
+                .boolean = js.Value.lessThanOrEqual(l, r),
+            }, value);
+            if (util.eql(op, ">")) return literalNode(allocator, .{
+                .boolean = js.Value.lessThan(r, l),
+            }, value);
+            if (util.eql(op, ">=")) return literalNode(allocator, .{
+                .boolean = js.Value.lessThanOrEqual(r, l),
+            }, value);
         }
     }
     if (value.type == .ConditionalExpression) {
@@ -568,7 +634,9 @@ const RefAnnotator = struct {
 
 fn configuredConstants(allocator: Allocator, fn_node: *Node) Error!OrderedMap(*Node) {
     var constants = OrderedMap(*Node).init(allocator);
-    const annotator = RefAnnotator{ .allocator = allocator };
+    const annotator = RefAnnotator{
+        .allocator = allocator,
+    };
     const body = fn_node.body orelse return constants;
     for (body.statements) |statement| {
         if (statement.type != .VariableDeclaration or statement.kind != .@"const") continue;
@@ -612,13 +680,19 @@ fn addActionAdapterBindings(allocator: Allocator, fn_node: *Node, bindings: *Ord
                     if (self.bindings.get(node.callee.?.name)) |prop| try self.called.put(prop, {});
                 }
             };
-            ast.walk(adapter.body.?, Ctx{ .bindings = bindings, .called = &called_props }, Ctx.visit) catch |e| return @as(Error, @errorCast(e));
+            ast.walk(adapter.body.?, Ctx{
+                .bindings = bindings,
+                .called = &called_props,
+            }, Ctx.visit) catch |e| return @as(Error, @errorCast(e));
             if (called_props.count() == 1) try bindings.put(id.name, called_props.keys()[0]);
         }
     }
 }
 
-const ConfiguredMap = struct { items: []*Node, callback: *Node };
+const ConfiguredMap = struct {
+    items: []*Node,
+    callback: *Node,
+};
 
 fn configuredMap(allocator: Allocator, node: *Node, environment: *const Environment, constants: *const OrderedMap(*Node)) Error!?ConfiguredMap {
     const expression = unwrap(node);
@@ -631,7 +705,10 @@ fn configuredMap(allocator: Allocator, node: *Node, environment: *const Environm
     for (callback.?.params) |parameter| if (parameter.type != .Identifier) return null;
     var items: std.ArrayList(*Node) = .empty;
     for (collection.elements) |element| if (element) |e| try items.append(allocator, e);
-    return .{ .items = try items.toOwnedSlice(allocator), .callback = callback.? };
+    return .{
+        .items = try items.toOwnedSlice(allocator),
+        .callback = callback.?,
+    };
 }
 
 fn privateConfiguredComponents(allocator: Allocator, program: *Node) Error!PrivateComponents {
@@ -639,7 +716,10 @@ fn privateConfiguredComponents(allocator: Allocator, program: *Node) Error!Priva
     for (program.statements) |statement| {
         if (statement.type != .FunctionDeclaration or statement.id == null or statement.body == null) continue;
         if (findReturnJsx(statement.body.?)) |root| {
-            try components.put(statement.id.?.name, .{ .fn_node = statement, .root = root });
+            try components.put(statement.id.?.name, .{
+                .fn_node = statement,
+                .root = root,
+            });
         }
     }
     return components;
@@ -657,7 +737,9 @@ fn privateComponentEnvironment(allocator: Allocator, component: PrivateComponent
         if (name_node.type != .JSXIdentifier) return err.failMsg("pjsx: private JSX component props must be named");
         const name = name_node.name;
         if (attribute.value_node == null) {
-            try attributes.put(name, try literalNode(allocator, .{ .boolean = true }, attribute));
+            try attributes.put(name, try literalNode(allocator, .{
+                .boolean = true,
+            }, attribute));
         } else if (attribute.value_node.?.type == .Literal) {
             try attributes.put(name, attribute.value_node.?);
         } else if (attribute.value_node.?.type == .JSXExpressionContainer) {
@@ -710,7 +792,9 @@ fn expandConfiguredChild(allocator: Allocator, child: *Node, environment: *const
             if (mapping.callback.params.len > 1) {
                 const index_parameter = mapping.callback.params[1];
                 if (index_parameter.type == .Identifier) {
-                    try item_environment.put(index_parameter.name, try literalNode(allocator, .{ .number = @floatFromInt(index) }, index_parameter));
+                    try item_environment.put(index_parameter.name, try literalNode(allocator, .{
+                        .number = @floatFromInt(index),
+                    }, index_parameter));
                 }
             }
             const body = try substituteConfiguredExpression(allocator, mapping.callback.body.?, &item_environment);
@@ -819,7 +903,11 @@ fn destructuredProps(allocator: Allocator, fn_node: *Node) Error!OrderedMap([]co
                 try self.names.put(try util.fmt(self.allocator, "{s}.{s}", .{ self.props_name, property.? }), property.?);
             }
         };
-        ast.walk(fn_node.body.?, Ctx{ .allocator = allocator, .props_name = props_name, .names = &names }, Ctx.visit) catch |e| return @as(Error, @errorCast(e));
+        ast.walk(fn_node.body.?, Ctx{
+            .allocator = allocator,
+            .props_name = props_name,
+            .names = &names,
+        }, Ctx.visit) catch |e| return @as(Error, @errorCast(e));
         return names;
     }
     if (param.type != .ObjectPattern) return err.failMsg("pjsx: component must take zero or one props object");
@@ -871,7 +959,9 @@ fn referencedActions(allocator: Allocator, root: *Node) Error!OrderedMap(ActionM
             }
         }
     };
-    ast.walk(root, Ctx{ .actions = &actions }, Ctx.visit) catch |e| return @as(Error, @errorCast(e));
+    ast.walk(root, Ctx{
+        .actions = &actions,
+    }, Ctx.visit) catch |e| return @as(Error, @errorCast(e));
     return actions;
 }
 
@@ -1007,11 +1097,18 @@ fn reactiveBinding(allocator: Allocator, fn_node: *Node, root: *Node, component_
                             const top_level_name: ?[]const u8 = if (decl_id.type == .Identifier and candidate == unwrap(self.declaration.init.?)) decl_id.name else null;
                             const name = candidate.pjsx_ref_name orelse top_level_name;
                             const access = candidate.pjsx_ref_access orelse top_level_name;
-                            if (name != null and access != null) try self.refs.put(name.?, .{ .name = name.?, .access = access.? });
+                            if (name != null and access != null) try self.refs.put(name.?, .{
+                                .name = name.?,
+                                .access = access.?,
+                            });
                             self.contains_ref.* = true;
                         }
                     };
-                    ast.walk(init, Ctx{ .declaration = declaration, .refs = &refs, .contains_ref = &contains_ref }, Ctx.visit) catch |e| return @as(Error, @errorCast(e));
+                    ast.walk(init, Ctx{
+                        .declaration = declaration,
+                        .refs = &refs,
+                        .contains_ref = &contains_ref,
+                    }, Ctx.visit) catch |e| return @as(Error, @errorCast(e));
                 }
             }
             if (contains_function or contains_ref) try local_statements.append(allocator, statement);
@@ -1111,11 +1208,19 @@ fn familyBinding(allocator: Allocator, program: *Node, fn_node: *Node, component
                         const top_level_name: ?[]const u8 = if (item_id.type == .Identifier and candidate == self.init) item_id.name else null;
                         const name = candidate.pjsx_ref_name orelse top_level_name;
                         const access = candidate.pjsx_ref_access orelse top_level_name;
-                        if (name != null and access != null) try self.refs.put(name.?, .{ .name = name.?, .access = access.? });
+                        if (name != null and access != null) try self.refs.put(name.?, .{
+                            .name = name.?,
+                            .access = access.?,
+                        });
                         self.carries.* = true;
                     }
                 };
-                ast.walk(init, Ctx{ .item = item, .init = init, .refs = &refs, .carries = &carries }, Ctx.visit) catch |e| return @as(Error, @errorCast(e));
+                ast.walk(init, Ctx{
+                    .item = item,
+                    .init = init,
+                    .refs = &refs,
+                    .carries = &carries,
+                }, Ctx.visit) catch |e| return @as(Error, @errorCast(e));
             }
             if (carries and declaration != state_statement) try module_statements.append(allocator, declaration);
             continue;
@@ -1150,7 +1255,11 @@ fn familyBinding(allocator: Allocator, program: *Node, fn_node: *Node, component
             if (expression.type != .AssignmentExpression or !util.eql(expression.operator, "=")) continue;
             const left = expression.left.?;
             if (left.type == .MemberExpression and !left.computed and left.object.?.isIdentifier(state_name.?) and left.property.?.type == .Identifier) {
-                try seeds.append(allocator, .{ .field = left.property.?.name, .value = expression.right.?, .statement = statement });
+                try seeds.append(allocator, .{
+                    .field = left.property.?.name,
+                    .value = expression.right.?,
+                    .statement = statement,
+                });
             }
         }
     }
@@ -1194,7 +1303,10 @@ fn importedFamilyBindings(allocator: Allocator, program: *Node) Error!?ImportedF
     }
 
     if (state_local == null and action_locals.count() == 0) return null;
-    return .{ .state_local = state_local, .action_locals = action_locals };
+    return .{
+        .state_local = state_local,
+        .action_locals = action_locals,
+    };
 }
 
 // ── Entry ──────────────────────────────────────────────────────────────────
@@ -1379,7 +1491,10 @@ pub fn collectClassTokens(allocator: Allocator, parsed: *const ParsedModule) Err
                         }
                     }
                 };
-                try ast.walk(value.?.expression.?, Parts{ .outer = &self, .found = &found_in_classes }, Parts.visitPart);
+                try ast.walk(value.?.expression.?, Parts{
+                    .outer = &self,
+                    .found = &found_in_classes,
+                }, Parts.visitPart);
                 return;
             }
             const bindings = &self.parsed.component.prop_bindings;
@@ -1411,11 +1526,19 @@ pub fn collectClassTokens(allocator: Allocator, parsed: *const ParsedModule) Err
                     }
                 }
             };
-            try ast.walk(value.?.expression.?, Inner{ .outer = &self, .found = &found }, Inner.visitPart);
+            try ast.walk(value.?.expression.?, Inner{
+                .outer = &self,
+                .found = &found,
+            }, Inner.visitPart);
             if (!found) return err.failMsg("pjsx: dynamic class expressions need statically enumerable literals");
         }
     };
-    ast.walk(parsed.component.root, Ctx{ .allocator = allocator, .parsed = parsed, .classes = &classes, .finite_maps = &finite_maps }, Ctx.visit) catch |e| return @as(Error, @errorCast(e));
+    ast.walk(parsed.component.root, Ctx{
+        .allocator = allocator,
+        .parsed = parsed,
+        .classes = &classes,
+        .finite_maps = &finite_maps,
+    }, Ctx.visit) catch |e| return @as(Error, @errorCast(e));
     const list = try allocator.dupe([]const u8, classes.keys());
     util.sortStrings(list);
     return list;

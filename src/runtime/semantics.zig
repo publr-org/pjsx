@@ -6,7 +6,13 @@ pub const version: u32 = 1;
 
 /// Tagged scalar transport. Untagged application JSON is a different, smaller
 /// value domain. Array envelopes cannot be mistaken for a scalar user value.
-pub const Scalar = union(enum) { undefined, null, boolean: bool, number: f64, string: []const u8 };
+pub const Scalar = union(enum) {
+    undefined,
+    null,
+    boolean: bool,
+    number: f64,
+    string: []const u8,
+};
 pub const DecodeError = error{InvalidPortableScalar};
 
 pub fn number_from_bits(hex: []const u8) DecodeError!f64 {
@@ -38,9 +44,15 @@ pub fn scalar_from_json(value: std.json.Value) DecodeError!Scalar {
     if (std.mem.eql(u8, tag, "undefined") and items.len == 1) return .undefined;
     if (std.mem.eql(u8, tag, "null") and items.len == 1) return .null;
     if (items.len != 2) return error.InvalidPortableScalar;
-    if (std.mem.eql(u8, tag, "number") and items[1] == .string) return .{ .number = try number_from_bits(items[1].string) };
-    if (std.mem.eql(u8, tag, "boolean") and items[1] == .bool) return .{ .boolean = items[1].bool };
-    if (std.mem.eql(u8, tag, "string") and items[1] == .string and std.unicode.utf8ValidateSlice(items[1].string)) return .{ .string = items[1].string };
+    if (std.mem.eql(u8, tag, "number") and items[1] == .string) return .{
+        .number = try number_from_bits(items[1].string),
+    };
+    if (std.mem.eql(u8, tag, "boolean") and items[1] == .bool) return .{
+        .boolean = items[1].bool,
+    };
+    if (std.mem.eql(u8, tag, "string") and items[1] == .string and std.unicode.utf8ValidateSlice(items[1].string)) return .{
+        .string = items[1].string,
+    };
     return error.InvalidPortableScalar;
 }
 
@@ -75,7 +87,9 @@ pub fn write_number(w: *std.Io.Writer, value: f64) std.Io.Writer.Error!void {
     if (value == 0) return w.writeAll("0");
     var buffer: [512]u8 = undefined;
     const scientific = @abs(value) >= 1e21 or @abs(value) < 1e-6;
-    const text = std.fmt.float.render(&buffer, value, .{ .mode = if (scientific) .scientific else .decimal }) catch unreachable;
+    const text = std.fmt.float.render(&buffer, value, .{
+        .mode = if (scientific) .scientific else .decimal,
+    }) catch unreachable;
     if (scientific) {
         const e = std.mem.indexOfScalar(u8, text, 'e').?;
         try w.writeAll(text[0 .. e + 1]);
@@ -93,7 +107,10 @@ pub fn number_to_string(a: std.mem.Allocator, value: f64) std.mem.Allocator.Erro
 }
 
 test "portable number formatting preserves JS special values and notation thresholds" {
-    const cases = [_]struct { f64, []const u8 }{
+    const cases = [_]struct {
+        f64,
+        []const u8,
+    }{
         .{ -0.0, "0" },                                  .{ std.math.nan(f64), "NaN" },
         .{ std.math.inf(f64), "Infinity" },              .{ -std.math.inf(f64), "-Infinity" },
         .{ 1e21, "1e+21" },                              .{ 1e-7, "1e-7" },
@@ -123,7 +140,9 @@ test "scalar envelopes round trip exact numeric bits and reject ambiguous inputs
         const bits = random.random().int(u64);
         var out: std.Io.Writer.Allocating = .init(a);
         defer out.deinit();
-        try write_scalar(&out.writer, .{ .number = @bitCast(bits) });
+        try write_scalar(&out.writer, .{
+            .number = @bitCast(bits),
+        });
         const parsed = try std.json.parseFromSlice(std.json.Value, a, out.written(), .{});
         defer parsed.deinit();
         const decoded = try scalar_from_json(parsed.value);

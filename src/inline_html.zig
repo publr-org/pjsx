@@ -9,7 +9,10 @@ const A = std.mem.Allocator;
 const S = []const u8;
 const N = ast.Node;
 const Error = err.Error;
-const View = struct { root: *N, param: S };
+const View = struct {
+    root: *N,
+    param: S,
+};
 
 fn simpleExpression(n: *N, param: S) bool {
     if (n.type == .Literal) return true;
@@ -62,7 +65,10 @@ fn view(program: *N, requested: ?S, static_shell: bool) ?View {
         const param = if (f.params.len == 1 and f.params[0].type == .Identifier) f.params[0].name else if (f.params.len == 0) "" else return null;
         const root = ast.unparen(ret.argument.?);
         if (static_shell and f.params.len != 0) return null;
-        if (simpleTree(root, param, if (static_shell) program else null)) return .{ .root = root, .param = param };
+        if (simpleTree(root, param, if (static_shell) program else null)) return .{
+            .root = root,
+            .param = param,
+        };
     }
     return null;
 }
@@ -74,7 +80,11 @@ pub fn isDisplayOnly(a: A, source: S, filename: S) Error!bool {
 pub fn isStaticShell(a: A, source: S, filename: S) Error!bool {
     return view(try parser.parse(a, source, filename), null, true) != null;
 }
-const Edit = struct { start: usize, end: usize, text: S };
+const Edit = struct {
+    start: usize,
+    end: usize,
+    text: S,
+};
 fn apply(a: A, source: S, edits: []Edit, start: usize, end: usize) Error!S {
     std.mem.sort(Edit, edits, {}, struct {
         fn less(_: void, x: Edit, y: Edit) bool {
@@ -137,20 +147,41 @@ pub fn expand(a: A, source: S, filename: S, resolver: types.Resolver) Error!S {
                                 r.valid.* = false;
                                 return;
                             };
-                            try r.edits.append(r.a, .{ .start = node.start, .end = node.end, .text = value });
+                            try r.edits.append(r.a, .{
+                                .start = node.start,
+                                .end = node.end,
+                                .text = value,
+                            });
                         }
                     };
                     var valid = true;
-                    try ast.walk(child.root, Replace{ .a = c.a, .param = child.param, .props = &props, .edits = &replacements, .valid = &valid }, Replace.visit);
+                    try ast.walk(child.root, Replace{
+                        .a = c.a,
+                        .param = child.param,
+                        .props = &props,
+                        .edits = &replacements,
+                        .valid = &valid,
+                    }, Replace.visit);
                     if (!valid) return;
                     const text = try apply(c.a, loaded.code, replacements.items, child.root.start, child.root.end);
-                    try c.edits.append(c.a, .{ .start = n.start, .end = n.end, .text = text });
+                    try c.edits.append(c.a, .{
+                        .start = n.start,
+                        .end = n.end,
+                        .text = text,
+                    });
                     return;
                 }
             }
         }
     };
-    ast.walk(program, Context{ .a = a, .source = source, .filename = filename, .resolver = resolver, .program = program, .edits = &edits }, Context.visit) catch |e| return @errorCast(e);
+    ast.walk(program, Context{
+        .a = a,
+        .source = source,
+        .filename = filename,
+        .resolver = resolver,
+        .program = program,
+        .edits = &edits,
+    }, Context.visit) catch |e| return @errorCast(e);
     return apply(a, source, edits.items, 0, source.len);
 }
 
@@ -158,17 +189,25 @@ const Fixture = struct {
     code: S,
     fn load(context: *anyopaque, _: A, _: S, _: S) Error!?types.Source {
         const self: *@This() = @ptrCast(@alignCast(context));
-        return .{ .filename = "Child.ptsx", .code = self.code };
+        return .{
+            .filename = "Child.ptsx",
+            .code = self.code,
+        };
     }
     fn resolver(self: *@This()) types.Resolver {
-        return .{ .context = self, .load = load };
+        return .{
+            .context = self,
+            .load = load,
+        };
     }
 };
 test "display props lower directly to the parent binding with no child call" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var child = Fixture{ .code = "export function Child(props: { value: number }) { return (<output>{props.value}</output>); }" };
+    var child = Fixture{
+        .code = "export function Child(props: { value: number }) { return (<output>{props.value}</output>); }",
+    };
     const source = "import { Child } from './Child.ptsx'; export function Parent() { let count = state(0); return <div><Child value={count} /><Child value={2} /></div>; }";
     const result = try expand(a, source, "Parent.ptsx", child.resolver());
     try std.testing.expect(std.mem.indexOf(u8, result, "<output>{count}</output><output>{2}</output>") != null);
@@ -178,7 +217,9 @@ test "stateful children and effectful prop expressions retain their boundary" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var child = Fixture{ .code = "export function Child(props: { value: number }) { let count = state(props.value); return <output>{count}</output>; }" };
+    var child = Fixture{
+        .code = "export function Child(props: { value: number }) { let count = state(props.value); return <output>{count}</output>; }",
+    };
     const source = "import { Child } from './Child.ptsx'; export function Parent() { return <div><Child value={count} /></div>; }";
     try std.testing.expectEqualStrings(source, try expand(a, source, "Parent.ptsx", child.resolver()));
     try std.testing.expect(!try isDisplayOnly(a, child.code, "Child.ptsx"));

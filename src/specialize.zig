@@ -9,7 +9,11 @@ const S = []const u8;
 const Node = ast.Node;
 pub fn compile(a: A, source: S, filename: S, runtime: S) err.Error!S {
     const program = try parser.parse(a, source, filename);
-    var transform = Transform{ .a = a, .source = source, .runtime = runtime };
+    var transform = Transform{
+        .a = a,
+        .source = source,
+        .runtime = runtime,
+    };
     for (program.statements) |statement| {
         if (statement.type != .ImportDeclaration or !util.eql(statement.source.?.stringValue() orelse "", runtime)) continue;
         for (statement.specifiers) |spec| if (spec.type == .ImportNamespaceSpecifier) {

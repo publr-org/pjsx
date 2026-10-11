@@ -31,7 +31,10 @@ fn parseArgs(arena: std.mem.Allocator, args: []const [:0]const u8) !Options {
     if (args.len < 3) usage();
     const command = std.meta.stringToEnum(Command, args[1]) orelse usage();
     var files: std.ArrayList([]const u8) = .empty;
-    var options = Options{ .command = command, .files = &.{} };
+    var options = Options{
+        .command = command,
+        .files = &.{},
+    };
     var i: usize = 2;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
@@ -113,7 +116,9 @@ fn outputName(buffer: []u8, command: Command, file: []const u8) ![]const u8 {
 
 /// Compile one module and stream the requested artifact into `writer`.
 fn compileTo(io: Io, arena: std.mem.Allocator, writer: *Io.Writer, options: Options, file: []const u8, source: []const u8) !void {
-    var resolver = pjsx.FileResolver{ .io = io };
+    var resolver = pjsx.FileResolver{
+        .io = io,
+    };
     compile(arena, writer, options, file, source, resolver.resolver()) catch |e| switch (e) {
         // The diagnostic text is the contract (same as the TypeScript `Error`
         // message); print it verbatim rather than through the logger.
@@ -139,14 +144,20 @@ fn compile(arena: std.mem.Allocator, writer: *Io.Writer, options: Options, file:
         .@"portable-dom", .@"portable-zig", .@"portable-php" => {
             const program = try pjsx.portable.prepare(arena, source, file, resolver);
             const target = if (options.command == .@"portable-dom") pjsx.portable.domTarget() else if (options.command == .@"portable-php") pjsx.portable.phpTarget() else pjsx.portable.zigTarget();
-            try writer.writeAll(try program.emit(target, .{ .runtime_import = options.runtime_import orelse "publr/dom" }));
+            try writer.writeAll(try program.emit(target, .{
+                .runtime_import = options.runtime_import orelse "publr/dom",
+            }));
         },
         .php => {
             const program = try pjsx.portable.prepareServer(arena, source, file, resolver);
             try writer.writeAll(try program.emit(pjsx.portable.phpTarget(), .{}));
         },
         .canonical => try writer.writeAll((try pjsx.canonicalize(arena, source)).code),
-        .dom => try writer.writeAll((try pjsx.dom.transformPjsxToDom(arena, source, .{ .filename = file, .runtime_import = options.runtime_import orelse "publr/dom", .resolver = resolver })).code),
+        .dom => try writer.writeAll((try pjsx.dom.transformPjsxToDom(arena, source, .{
+            .filename = file,
+            .runtime_import = options.runtime_import orelse "publr/dom",
+            .resolver = resolver,
+        })).code),
         // Single-file mode: the compile set is just this module, so
         // cross-module component imports will not resolve here.
         .@"dom-zig" => {

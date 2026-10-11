@@ -16,18 +16,28 @@ pub fn build(b: *std.Build, library: *std.Build.Module, amalgamation: *std.Build
     test_options.addOption(?[]const u8, "ds_root", b.option([]const u8, "ds_root", "Path to design-system-v2/src/components for the corpus test"));
 
     for ([_]*std.Build.Module{ library, amalgamation }) |module| {
-        const unit_tests = b.addTest(.{ .root_module = module });
+        const unit_tests = b.addTest(.{
+            .root_module = module,
+        });
 
         const integration_module = b.createModule(.{
             .root_source_file = b.path("tests/root.zig"),
             .target = library.resolved_target.?,
             .optimize = library.optimize.?,
             .imports = &.{
-                .{ .name = "pjsx", .module = module },
-                .{ .name = "build_options", .module = test_options.createModule() },
+                .{
+                    .name = "pjsx",
+                    .module = module,
+                },
+                .{
+                    .name = "build_options",
+                    .module = test_options.createModule(),
+                },
             },
         });
-        const integration_tests = b.addTest(.{ .root_module = integration_module });
+        const integration_tests = b.addTest(.{
+            .root_module = integration_module,
+        });
 
         test_step.dependOn(&b.addRunArtifact(unit_tests).step);
         test_step.dependOn(&b.addRunArtifact(integration_tests).step);
@@ -45,8 +55,13 @@ pub fn build(b: *std.Build, library: *std.Build.Module, amalgamation: *std.Build
         .root_source_file = b.path("src/runtime/server.zig"),
         .target = library.resolved_target.?,
         .optimize = library.optimize.?,
-        .imports = &.{.{ .name = "class_merge", .module = stub_class_merge }},
+        .imports = &.{.{
+            .name = "class_merge",
+            .module = stub_class_merge,
+        }},
     });
-    const runtime_tests = b.addTest(.{ .root_module = runtime_module });
+    const runtime_tests = b.addTest(.{
+        .root_module = runtime_module,
+    });
     test_step.dependOn(&b.addRunArtifact(runtime_tests).step);
 }

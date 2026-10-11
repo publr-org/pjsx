@@ -98,7 +98,9 @@ const Type = union(enum) {
         key_enum: Enumeration,
     };
 
-    const UnionInfo = struct { name: []const u8 };
+    const UnionInfo = struct {
+        name: []const u8,
+    };
 
     fn is_optional(t: Type) bool {
         return switch (t) {
@@ -113,7 +115,9 @@ const Type = union(enum) {
             .opt_boolean => .boolean,
             .opt_number => .number,
             .opt_node => .node,
-            .opt_enumeration => |e| .{ .enumeration = e },
+            .opt_enumeration => |e| .{
+                .enumeration = e,
+            },
             .opt_strings => .strings,
             else => t,
         };
@@ -177,11 +181,27 @@ const Module = struct {
         seed_exprs: []const Seed,
         initials: []const Initial,
     };
-    const Seed = struct { field: []const u8, expr: *const ExpressionIR };
-    const Initial = struct { field: []const u8, expr: ?*const ExpressionIR };
-    const Import = struct { local: []const u8, imported: []const u8, module: []const u8 };
-    const FiniteMap = struct { name: []const u8, entries: []const Type.MapEntry };
-    const StoreRegistration = struct { store: []const u8, code: []const u8 };
+    const Seed = struct {
+        field: []const u8,
+        expr: *const ExpressionIR,
+    };
+    const Initial = struct {
+        field: []const u8,
+        expr: ?*const ExpressionIR,
+    };
+    const Import = struct {
+        local: []const u8,
+        imported: []const u8,
+        module: []const u8,
+    };
+    const FiniteMap = struct {
+        name: []const u8,
+        entries: []const Type.MapEntry,
+    };
+    const StoreRegistration = struct {
+        store: []const u8,
+        code: []const u8,
+    };
 };
 
 /// A typed Zig expression the lowering produced.
@@ -241,7 +261,9 @@ fn request_type(comptime Value: type) Type {
     }
     if (@typeInfo(Value) == .@"struct") {
         if (@hasField(Value, "render_fn")) return .node;
-        return .{ .item = request_fields_of(Value) };
+        return .{
+            .item = request_fields_of(Value),
+        };
     }
     @compileError("a request field of type " ++ @typeName(Value) ++ " is not readable");
 }
@@ -278,7 +300,9 @@ fn is_publr_request(member: anytype) bool {
     return util.eql(member.object.reference.name, "Publr");
 }
 
-pub const ZigOutput = struct { code: []const u8 };
+pub const ZigOutput = struct {
+    code: []const u8,
+};
 
 /// A whole compile set: the adapted modules, sorted by name. Components
 /// resolve their imports against it, so every module a view references must
@@ -299,7 +323,9 @@ pub const Program = struct {
             modules[i] = try adapt_module(arena, ir);
         }
         std.mem.sort(Module, modules, {}, module_less_than);
-        return .{ .modules = modules };
+        return .{
+            .modules = modules,
+        };
     }
 
     /// The generated Zig for the named component.
@@ -404,7 +430,9 @@ pub fn lowerPjsxToZig(
         break :blk all;
     };
     const program = try Program.init(arena, irs);
-    return .{ .code = try program.lower(arena, module.component.name) };
+    return .{
+        .code = try program.lower(arena, module.component.name),
+    };
 }
 
 fn module_less_than(_: void, a: Module, b: Module) bool {
@@ -445,7 +473,10 @@ fn adapt_module(arena: std.mem.Allocator, ir: *const compiler.ModuleIR) Error!Mo
     if (component.family) |family| {
         var seed_exprs = try arena.alloc(Module.Seed, family.seed_exprs.len);
         for (family.seed_exprs, 0..) |seed, i| {
-            seed_exprs[i] = .{ .field = seed.field, .expr = seed.value };
+            seed_exprs[i] = .{
+                .field = seed.field,
+                .expr = seed.value,
+            };
         }
         wire = .{
             .store = family.store,
@@ -462,14 +493,23 @@ fn adapt_module(arena: std.mem.Allocator, ir: *const compiler.ModuleIR) Error!Mo
     for (ir.finite_maps.keys(), ir.finite_maps.values()) |name, entries| {
         var list = try arena.alloc(Type.MapEntry, entries.count());
         for (entries.keys(), entries.values(), 0..) |key, value, i| {
-            list[i] = .{ .key = key, .value = value };
+            list[i] = .{
+                .key = key,
+                .value = value,
+            };
         }
-        try finite_maps.append(arena, .{ .name = name, .entries = list });
+        try finite_maps.append(arena, .{
+            .name = name,
+            .entries = list,
+        });
     }
 
     var string_constants = try arena.alloc(Type.MapEntry, ir.string_constants.len);
     for (ir.string_constants, 0..) |constant, i| {
-        string_constants[i] = .{ .key = constant.name, .value = constant.value };
+        string_constants[i] = .{
+            .key = constant.name,
+            .value = constant.value,
+        };
     }
 
     var imports: std.ArrayList(Module.Import) = .empty;
@@ -505,7 +545,10 @@ fn adapt_module(arena: std.mem.Allocator, ir: *const compiler.ModuleIR) Error!Mo
         .finite_maps = finite_maps.items,
         .string_constants = string_constants,
         .store_registration = if (component.store_registration) |registration|
-            .{ .store = registration.name, .code = registration.code }
+            .{
+                .store = registration.name,
+                .code = registration.code,
+            }
         else
             null,
         .transport_root = transports_at_root(component.root),
@@ -515,7 +558,10 @@ fn adapt_module(arena: std.mem.Allocator, ir: *const compiler.ModuleIR) Error!Mo
 fn adapt_initials(arena: std.mem.Allocator, initial: []const compiler.InitialIR) Error![]const Module.Initial {
     const out = try arena.alloc(Module.Initial, initial.len);
     for (initial, 0..) |entry, i| {
-        out[i] = .{ .field = entry.field, .expr = entry.value };
+        out[i] = .{
+            .field = entry.field,
+            .expr = entry.value,
+        };
     }
     return out;
 }
@@ -626,7 +672,10 @@ fn adapt_props(
 
             try types.writeAll(" };\n");
 
-            const enumeration: Type.Enumeration = .{ .name = enum_name, .values = tags.items };
+            const enumeration: Type.Enumeration = .{
+                .name = enum_name,
+                .values = tags.items,
+            };
             // A default outside the value set (Input's `inputMode: ""`) means
             // "no value": the prop is optional and the attribute is omitted.
             const default_string: ?[]const u8 = if (spec.default) |d| d.asString() else null;
@@ -638,11 +687,15 @@ fn adapt_props(
             } else null;
 
             if ((spec.default != null and listed_default == null) or (spec.typescript != null and spec.optional and spec.default == null)) {
-                prop_type = .{ .opt_enumeration = enumeration };
+                prop_type = .{
+                    .opt_enumeration = enumeration,
+                };
                 zig_type = try std.fmt.allocPrint(arena, "?{s}", .{enum_name});
                 default_code = "null";
             } else {
-                prop_type = .{ .enumeration = enumeration };
+                prop_type = .{
+                    .enumeration = enumeration,
+                };
                 zig_type = enum_name;
                 if (listed_default) |d| {
                     default_code = try std.fmt.allocPrint(arena, ".@\"{s}\"", .{d});
@@ -707,7 +760,11 @@ fn adapt_props(
                     "pub const {s} = union(enum) {{ string: []const u8, number_string_tuple: struct {{ f64, []const u8 }} }};\n",
                     .{union_name},
                 );
-                prop_type = .{ .union_value = .{ .name = union_name } };
+                prop_type = .{
+                    .union_value = .{
+                        .name = union_name,
+                    },
+                };
                 zig_type = union_name;
             },
             .action => {
@@ -731,7 +788,9 @@ fn adapt_props(
                     try write_fields(types, item_fields);
                     try types.writeAll("};\n");
 
-                    prop_type = .{ .array = item_fields };
+                    prop_type = .{
+                        .array = item_fields,
+                    };
                     zig_type = try std.fmt.allocPrint(arena, "[]const {s}", .{struct_name});
                 } else if (spec.items) |items| {
                     if (items != .string) {
@@ -863,14 +922,23 @@ const Generator = struct {
     wire_aliases: std.ArrayList([]const u8) = .empty,
     template_depth: u32 = 0,
     seeded_depth: u32 = 0,
-    templates: std.ArrayList(struct { expression: *const ExpressionIR, name: []const u8 }) = .empty,
+    templates: std.ArrayList(struct {
+        expression: *const ExpressionIR,
+        name: []const u8,
+    }) = .empty,
     /// The item structs and enums of asserted array literals (`[] as Row[]`),
     /// declared at file scope once per literal.
     asserted_types: std.ArrayList(u8) = .empty,
-    asserted_arrays: std.ArrayList(struct { expression: *const ExpressionIR, lowered: Lowered }) = .empty,
+    asserted_arrays: std.ArrayList(struct {
+        expression: *const ExpressionIR,
+        lowered: Lowered,
+    }) = .empty,
     /// `a && b && <jsx/>` regrouped as `a && (b && <jsx/>)`, once per
     /// expression, so each guard is its own branch with a stable template id.
-    split_guards: std.ArrayList(struct { expression: *const ExpressionIR, split: *const ExpressionIR }) = .empty,
+    split_guards: std.ArrayList(struct {
+        expression: *const ExpressionIR,
+        split: *const ExpressionIR,
+    }) = .empty,
     /// The expression whose static fallback is being lowered inside its own
     /// prop-wire branch, so it is not wired again there.
     prop_wire_skip: ?*const ExpressionIR = null,
@@ -906,7 +974,10 @@ const Generator = struct {
         actions: []const NamePair,
         refs: []const NamePair,
     };
-    const NamePair = struct { local: []const u8, name: []const u8 };
+    const NamePair = struct {
+        local: []const u8,
+        name: []const u8,
+    };
 
     fn init(arena: std.mem.Allocator, module: Module, modules: []const Module) Generator {
         return .{
@@ -969,8 +1040,14 @@ const Generator = struct {
             }
 
             if (is_state) state_local = import.local;
-            if (is_action) try actions.append(gen.arena, .{ .local = import.local, .name = import.imported });
-            if (is_ref) try refs.append(gen.arena, .{ .local = import.local, .name = import.imported });
+            if (is_action) try actions.append(gen.arena, .{
+                .local = import.local,
+                .name = import.imported,
+            });
+            if (is_ref) try refs.append(gen.arena, .{
+                .local = import.local,
+                .name = import.imported,
+            });
         }
 
         if (family_module) |name| {
@@ -1010,7 +1087,12 @@ const Generator = struct {
             const name = try gen.fresh("local");
             try gen.line("const {s} = {s};", .{ name, value.code });
             try gen.line("_ = &{s};", .{name});
-            try gen.locals.append(gen.arena, .{ .name = name, .source_name = binding.name, .type = value.type, .binding = binding.value });
+            try gen.locals.append(gen.arena, .{
+                .name = name,
+                .source_name = binding.name,
+                .type = value.type,
+                .binding = binding.value,
+            });
         }
         gen.at_root = true;
         try gen.node(gen.module.root);
@@ -1133,7 +1215,9 @@ const Generator = struct {
     }
 
     fn element(gen: *Generator, tag: []const u8, n: *const ElementIR) Error!void {
-        try gen.element_body(.{ .static = tag }, n, null);
+        try gen.element_body(.{
+            .static = tag,
+        }, n, null);
     }
 
     /// The tag of an element being emitted: known at compile time, or a bound
@@ -1156,10 +1240,19 @@ const Generator = struct {
         };
     };
 
-    const Binding = struct { name: []const u8, wire: []const u8 };
-    const SsrAttr = struct { name: []const u8, lowered: Lowered };
+    const Binding = struct {
+        name: []const u8,
+        wire: []const u8,
+    };
+    const SsrAttr = struct {
+        name: []const u8,
+        lowered: Lowered,
+    };
 
-    const OwnInitial = union(enum) { lowered: Lowered, unservable };
+    const OwnInitial = union(enum) {
+        lowered: Lowered,
+        unservable,
+    };
 
     /// The seed expression behind an own-state wire (`state.value` on the
     /// family root, where `state.value = value ?? defaultValue` seeds it):
@@ -1197,7 +1290,12 @@ const Generator = struct {
         if (e.* == .member and e.member.property == .string and std.mem.eql(u8, e.member.property.string, "length")) {
             if (try gen.own_initial(e.member.object)) |initial| {
                 if (initial == .lowered and (initial.lowered.type == .array or initial.lowered.type == .strings)) {
-                    return .{ .lowered = .{ .code = try std.fmt.allocPrint(gen.arena, "@as(f64, @floatFromInt({s}.len))", .{initial.lowered.code}), .type = .number } };
+                    return .{
+                        .lowered = .{
+                            .code = try std.fmt.allocPrint(gen.arena, "@as(f64, @floatFromInt({s}.len))", .{initial.lowered.code}),
+                            .type = .number,
+                        },
+                    };
                 }
             }
         }
@@ -1205,20 +1303,26 @@ const Generator = struct {
             for (gen.wire_aliases.items) |alias| {
                 if (!path.own or !std.mem.startsWith(u8, path.spec, alias)) continue;
                 if (path.spec.len == alias.len or path.spec[alias.len] == '.') {
-                    return .{ .lowered = try gen.expression(e) };
+                    return .{
+                        .lowered = try gen.expression(e),
+                    };
                 }
             }
         }
         // A template over own state: its parts' initials, formatted.
         if (e.* == .template and try gen.wire_spec(e) != null) {
-            return if (try gen.template_with(e, true)) |lowered| .{ .lowered = lowered } else .unservable;
+            return if (try gen.template_with(e, true)) |lowered| .{
+                .lowered = lowered,
+            } else .unservable;
         }
         if (e.* == .conditional) {
             if (try gen.own_initial(e.conditional.@"test")) |test_value| {
                 if (test_value == .unservable) return .unservable;
                 const consequent = (try gen.initial_or_expression(e.conditional.consequent)) orelse return .unservable;
                 const alternate = (try gen.initial_or_expression(e.conditional.alternate)) orelse return .unservable;
-                return .{ .lowered = try gen.select(try gen.truthy(test_value.lowered), consequent, alternate) };
+                return .{
+                    .lowered = try gen.select(try gen.truthy(test_value.lowered), consequent, alternate),
+                };
             }
         }
         // `!state.x` inverts its field's initial.
@@ -1226,10 +1330,12 @@ const Generator = struct {
             const inner = (try gen.own_initial(e.unary.argument)) orelse return null;
             return switch (inner) {
                 .unservable => .unservable,
-                .lowered => |lowered| .{ .lowered = .{
-                    .code = try std.fmt.allocPrint(gen.arena, "!{s}", .{try gen.truthy(lowered)}),
-                    .type = .boolean,
-                } },
+                .lowered => |lowered| .{
+                    .lowered = .{
+                        .code = try std.fmt.allocPrint(gen.arena, "!{s}", .{try gen.truthy(lowered)}),
+                        .type = .boolean,
+                    },
+                },
             };
         }
 
@@ -1244,11 +1350,15 @@ const Generator = struct {
                 if (right_initial == null and gen.wire_state_path(e.operation.right) != null) return .unservable;
                 const left = if (left_initial) |initial| initial.lowered else try gen.expression(e.operation.left);
                 const right = if (right_initial) |initial| initial.lowered else try gen.expression(e.operation.right);
-                return .{ .lowered = try gen.operation_values(e, left, right) };
+                return .{
+                    .lowered = try gen.operation_values(e, left, right),
+                };
             }
         }
         if (try gen.seed_lowered(e)) |lowered| {
-            return .{ .lowered = lowered };
+            return .{
+                .lowered = lowered,
+            };
         }
         const wire = gen.module.wire orelse return null;
         const path = gen.wire_state_path(e) orelse return null;
@@ -1256,7 +1366,9 @@ const Generator = struct {
         for (wire.initials) |initial| {
             if (!std.mem.eql(u8, initial.field, path.spec)) continue;
             const expr = initial.expr orelse return .unservable;
-            return .{ .lowered = try gen.expression(expr) };
+            return .{
+                .lowered = try gen.expression(expr),
+            };
         }
         return null;
     }
@@ -1272,7 +1384,10 @@ const Generator = struct {
                 try gen.static(" ");
                 try gen.static(name);
                 try gen.static("=\"");
-                try gen.write_value(.{ .code = try gen.truthy(lowered), .type = .boolean });
+                try gen.write_value(.{
+                    .code = try gen.truthy(lowered),
+                    .type = .boolean,
+                });
                 try gen.static("\"");
             } else {
                 try gen.line("if ({s}) try {s}.writeAll(\" {s}\");", .{
@@ -1324,7 +1439,10 @@ const Generator = struct {
                         (try gen.wire_spec(binding.value) orelse return gen.fail("binding {s} has no reactive source", .{binding.name})).spec
                     else
                         try gen.wire_text(binding.form, binding.value);
-                    try bindings.append(gen.arena, .{ .name = binding.name, .wire = wire });
+                    try bindings.append(gen.arena, .{
+                        .name = binding.name,
+                        .wire = wire,
+                    });
                 },
                 .attribute => |plain_attr| {
                     const name = plain_attr.name;
@@ -1339,7 +1457,10 @@ const Generator = struct {
                     if (std.mem.eql(u8, name, "innerHTML")) {
                         if (form == .expression) {
                             if (try gen.wire_spec(value)) |wired| {
-                                try bindings.append(gen.arena, .{ .name = name, .wire = wired.spec });
+                                try bindings.append(gen.arena, .{
+                                    .name = name,
+                                    .wire = wired.spec,
+                                });
                                 if (wired.own) {
                                     if (try gen.own_initial(value)) |initial| {
                                         if (initial == .lowered and initial.lowered.type != .null) html_ssr = initial.lowered;
@@ -1418,17 +1539,29 @@ const Generator = struct {
                                         // whenever the initial folds to a constant.
                                         // `ssr_attribute` renders a boolean as the
                                         // bare attribute already.
-                                        try own_ssr.append(gen.arena, .{ .name = name, .lowered = initial });
+                                        try own_ssr.append(gen.arena, .{
+                                            .name = name,
+                                            .lowered = initial,
+                                        });
                                         show_wire = try gen.invert_wire(wired.spec);
                                     } else {
-                                        try own_ssr.append(gen.arena, .{ .name = name, .lowered = initial });
-                                        try bindings.append(gen.arena, .{ .name = name, .wire = wired.spec });
+                                        try own_ssr.append(gen.arena, .{
+                                            .name = name,
+                                            .lowered = initial,
+                                        });
+                                        try bindings.append(gen.arena, .{
+                                            .name = name,
+                                            .wire = wired.spec,
+                                        });
                                     },
                                     .unservable => if (std.mem.eql(u8, name, "hidden")) {
                                         if (show_wire != null) return gen.fail("an element carries two `:show` wires", .{});
                                         show_wire = try gen.invert_wire(wired.spec);
                                     } else {
-                                        try bindings.append(gen.arena, .{ .name = name, .wire = wired.spec });
+                                        try bindings.append(gen.arena, .{
+                                            .name = name,
+                                            .wire = wired.spec,
+                                        });
                                     },
                                 }
                                 continue;
@@ -1437,7 +1570,10 @@ const Generator = struct {
                                 if (show_wire != null) return gen.fail("an element carries two `:show` wires", .{});
                                 show_wire = try gen.invert_wire(wired.spec);
                             } else {
-                                try bindings.append(gen.arena, .{ .name = name, .wire = wired.spec });
+                                try bindings.append(gen.arena, .{
+                                    .name = name,
+                                    .wire = wired.spec,
+                                });
                             }
                             continue;
                         }
@@ -1482,7 +1618,10 @@ const Generator = struct {
                 if (show_wire != null) return gen.fail("an element carries two `:show` wires", .{});
                 show_wire = try gen.invert_wire(wire);
             } else {
-                try bindings.append(gen.arena, .{ .name = name, .wire = wire });
+                try bindings.append(gen.arena, .{
+                    .name = name,
+                    .wire = wire,
+                });
             }
         }
 
@@ -1576,7 +1715,10 @@ const Generator = struct {
                         const binding = try gen.fresh("seed");
                         try gen.line("if ({s}) |{s}| {{", .{ lowered.code, binding });
                         gen.indent += 1;
-                        lowered = .{ .code = binding, .type = lowered.type.unwrapped() };
+                        lowered = .{
+                            .code = binding,
+                            .type = lowered.type.unwrapped(),
+                        };
                     }
                     if (has_optional) {
                         try gen.line("try {s}.writeAll({s});", .{ gen.writer_name, separator });
@@ -1817,10 +1959,18 @@ const Generator = struct {
         }
 
         if (ev.form == .literal) {
-            return .{ .descriptor = descriptor.written(), .action = .{ .static = try gen.literal_text(ev.value) } };
+            return .{
+                .descriptor = descriptor.written(),
+                .action = .{
+                    .static = try gen.literal_text(ev.value),
+                },
+            };
         }
 
-        return .{ .descriptor = descriptor.written(), .action = try gen.action_of(try gen.expression(ev.value)) };
+        return .{
+            .descriptor = descriptor.written(),
+            .action = try gen.action_of(try gen.expression(ev.value)),
+        };
     }
 
     /// An `onInput={syncTitle}` attribute: the event name comes from the
@@ -1832,15 +1982,27 @@ const Generator = struct {
 
         const descriptor = try util.eventDescriptor(gen.arena, name);
         if (try gen.wire_spec(a.value)) |wired| {
-            if (std.mem.indexOf(u8, wired.spec, "::") != null) return .{ .descriptor = descriptor, .action = .{ .static = wired.spec } };
+            if (std.mem.indexOf(u8, wired.spec, "::") != null) return .{
+                .descriptor = descriptor,
+                .action = .{
+                    .static = wired.spec,
+                },
+            };
         }
-        return .{ .descriptor = descriptor, .action = try gen.action_of(try gen.expression(a.value)) };
+        return .{
+            .descriptor = descriptor,
+            .action = try gen.action_of(try gen.expression(a.value)),
+        };
     }
 
     fn action_of(gen: *Generator, lowered: Lowered) Error!Event.ActionRef {
         return switch (lowered.type) {
-            .action_name => .{ .static = try unquoted(gen, lowered.code) },
-            .action => .{ .runtime = lowered.code },
+            .action_name => .{
+                .static = try unquoted(gen, lowered.code),
+            },
+            .action => .{
+                .runtime = lowered.code,
+            },
             else => gen.fail("an event handler must be a reactive action, got a {s}", .{@tagName(lowered.type)}),
         };
     }
@@ -1891,12 +2053,18 @@ const Generator = struct {
         if (try gen.class_wire_group(e)) |group| {
             if (group.own) {
                 const initial = (try gen.own_initial(e.conditional.@"test")) orelse return gen.fail("no SSR initial for a reactive class", .{});
-                if (initial == .unservable) return .{ .code = "\"\"", .type = .string };
-                return .{ .code = try std.fmt.allocPrint(gen.arena, "(if ({s}) {s} else {s})", .{
-                    try gen.truthy(initial.lowered),
-                    (try gen.expression(e.conditional.consequent)).code,
-                    (try gen.expression(e.conditional.alternate)).code,
-                }), .type = .string };
+                if (initial == .unservable) return .{
+                    .code = "\"\"",
+                    .type = .string,
+                };
+                return .{
+                    .code = try std.fmt.allocPrint(gen.arena, "(if ({s}) {s} else {s})", .{
+                        try gen.truthy(initial.lowered),
+                        (try gen.expression(e.conditional.consequent)).code,
+                        (try gen.expression(e.conditional.alternate)).code,
+                    }),
+                    .type = .string,
+                };
             }
         }
         return gen.expression(e);
@@ -2043,7 +2211,10 @@ const Generator = struct {
                     try gen.static(" ");
                     try gen.static(name);
                     try gen.static("=\"");
-                    try gen.write_value(.{ .code = binding, .type = .boolean });
+                    try gen.write_value(.{
+                        .code = binding,
+                        .type = .boolean,
+                    });
                     try gen.static("\"");
                     try gen.flush();
                     gen.indent -= 1;
@@ -2085,7 +2256,10 @@ const Generator = struct {
             try gen.static(name);
             try gen.static("=\"");
             if (url) try gen.url_base_for(binding);
-            try gen.write_value(.{ .code = binding, .type = lowered.type.unwrapped() });
+            try gen.write_value(.{
+                .code = binding,
+                .type = lowered.type.unwrapped(),
+            });
             try gen.static("\"");
             try gen.flush();
             gen.indent -= 1;
@@ -2101,7 +2275,10 @@ const Generator = struct {
             try gen.flush();
             try gen.line("const {s} = {s};", .{ binding, lowered.code });
             try gen.url_base_for(binding);
-            try gen.write_value(.{ .code = binding, .type = lowered.type });
+            try gen.write_value(.{
+                .code = binding,
+                .type = lowered.type,
+            });
         } else {
             try gen.write_value(lowered);
         }
@@ -2478,7 +2655,10 @@ const Generator = struct {
                 }
                 gen.props_used = true;
                 try gen.line("const {s} = .{{{s} }};", .{ capture, captured.written() });
-                return .{ .code = try std.fmt.allocPrint(gen.arena, "rt.block(&{s}, {s})", .{ capture, body_type }), .type = .node };
+                return .{
+                    .code = try std.fmt.allocPrint(gen.arena, "rt.block(&{s}, {s})", .{ capture, body_type }),
+                    .type = .node,
+                };
             },
             .conditional => |conditional| {
                 const test_code = try gen.truthy(try gen.expression(conditional.@"test"));
@@ -2501,7 +2681,10 @@ const Generator = struct {
                 if (std.mem.eql(u8, operation_ir.operator, "||")) {
                     const left = try gen.optional_markup(operation_ir.left);
                     const right = try gen.optional_markup(operation_ir.right);
-                    return .{ .code = try std.fmt.allocPrint(gen.arena, "({s} orelse {s})", .{ left, right }), .type = .opt_node };
+                    return .{
+                        .code = try std.fmt.allocPrint(gen.arena, "({s} orelse {s})", .{ left, right }),
+                        .type = .opt_node,
+                    };
                 }
                 return gen.fail("markup combined with \"{s}\" is not lowered", .{operation_ir.operator});
             },
@@ -2509,7 +2692,10 @@ const Generator = struct {
                 const lowered = try gen.expression(e);
                 return switch (lowered.type) {
                     .node, .opt_node => lowered,
-                    .null => .{ .code = "null", .type = .opt_node },
+                    .null => .{
+                        .code = "null",
+                        .type = .opt_node,
+                    },
                     else => gen.fail("a {s} where markup goes", .{@tagName(lowered.type)}),
                 };
             },
@@ -2714,7 +2900,11 @@ const Generator = struct {
             }
             const plain_attr: PlainAttrIR = switch (a) {
                 .attribute => |plain| plain,
-                .binding => |binding| .{ .name = binding.name, .form = binding.form, .value = binding.value },
+                .binding => |binding| .{
+                    .name = binding.name,
+                    .form = binding.form,
+                    .value = binding.value,
+                },
                 else => return gen.fail("<Slot> carries a {s}, which is not lowered", .{@tagName(a)}),
             };
             const attr_name = plain_attr.name;
@@ -2915,7 +3105,9 @@ const Generator = struct {
         } else return gen.fail("<Dynamic> without an `as` attribute", .{});
 
         if (as.form == .literal) {
-            return gen.element_body(.{ .static = try gen.literal_text(as.value) }, n, "as");
+            return gen.element_body(.{
+                .static = try gen.literal_text(as.value),
+            }, n, "as");
         }
 
         const lowered = try gen.expression(as.value);
@@ -2927,7 +3119,9 @@ const Generator = struct {
         const binding = try gen.fresh("tag");
 
         try gen.line("const {s} = {s};", .{ binding, code });
-        try gen.element_body(.{ .runtime = binding }, n, "as");
+        try gen.element_body(.{
+            .runtime = binding,
+        }, n, "as");
     }
 
     fn is_publr_jsx_import(gen: *Generator, local: []const u8) bool {
@@ -2998,7 +3192,10 @@ const Generator = struct {
         return null;
     }
 
-    const StringLookup = struct { entries: []const Type.MapEntry, key_code: []const u8 };
+    const StringLookup = struct {
+        entries: []const Type.MapEntry,
+        key_code: []const u8,
+    };
 
     /// The map and the lowered key of `TONES[kind]` over a finite map with a
     /// string key; null when the value is not such a lookup.
@@ -3008,7 +3205,10 @@ const Generator = struct {
         if (object.type != .finite_map) return null;
         const key = try gen.member_index(value.member.property);
         if (key.type != .string) return null;
-        return .{ .entries = object.type.finite_map, .key_code = key.code };
+        return .{
+            .entries = object.type.finite_map,
+            .key_code = key.code,
+        };
     }
 
     /// The initializer of the component-body binding a local name resolves
@@ -3174,7 +3374,10 @@ const Generator = struct {
                     const binding = try gen.fresh("present");
                     try gen.line("if ({s}) |{s}| {{", .{ left.code, binding });
                     gen.indent += 1;
-                    try gen.write_child_value(.{ .code = binding, .type = left.type.unwrapped() });
+                    try gen.write_child_value(.{
+                        .code = binding,
+                        .type = left.type.unwrapped(),
+                    });
                     try gen.flush();
                     gen.indent -= 1;
                     try gen.line("}} else {{", .{});
@@ -3198,7 +3401,10 @@ const Generator = struct {
                     if (gen.module.semantics_version != 0) {
                         const name = try gen.fresh("guard");
                         try gen.line("const {s} = {s};", .{ name, left.code });
-                        const saved = Lowered{ .code = name, .type = left.type };
+                        const saved = Lowered{
+                            .code = name,
+                            .type = left.type,
+                        };
                         try gen.line("if ({s}) {{", .{try gen.truthy(saved)});
                         gen.indent += 1;
                         try gen.child_expression(operation_ir.right);
@@ -3367,10 +3573,25 @@ const Generator = struct {
         if (try gen.wire_spec(guards.operation.left) == null and try gen.wire_spec(guards.operation.right) == null) return null;
 
         const inner = try gen.arena.create(ExpressionIR);
-        inner.* = .{ .operation = .{ .operator = "&&", .left = guards.operation.right, .right = e.operation.right } };
+        inner.* = .{
+            .operation = .{
+                .operator = "&&",
+                .left = guards.operation.right,
+                .right = e.operation.right,
+            },
+        };
         const outer = try gen.arena.create(ExpressionIR);
-        outer.* = .{ .operation = .{ .operator = "&&", .left = guards.operation.left, .right = inner } };
-        try gen.split_guards.append(gen.arena, .{ .expression = e, .split = outer });
+        outer.* = .{
+            .operation = .{
+                .operator = "&&",
+                .left = guards.operation.left,
+                .right = inner,
+            },
+        };
+        try gen.split_guards.append(gen.arena, .{
+            .expression = e,
+            .split = outer,
+        });
         return outer;
     }
 
@@ -3439,7 +3660,9 @@ const Generator = struct {
         }
         const subject = try gen.expression(call.callee.member.object);
         const item_type: Type = switch (subject.type) {
-            .array => |fields| .{ .item = fields },
+            .array => |fields| .{
+                .item = fields,
+            },
             .strings => .string,
             else => return gen.fail("`.map` on a {s}, which is not a lowered array", .{@tagName(subject.type)}),
         };
@@ -3447,7 +3670,10 @@ const Generator = struct {
 
         try gen.line("for ({s}) |{s}| {{", .{ subject.code, parameter });
         gen.indent += 1;
-        try gen.locals.append(gen.arena, .{ .name = parameter, .type = item_type });
+        try gen.locals.append(gen.arena, .{
+            .name = parameter,
+            .type = item_type,
+        });
         try gen.child_expression(function.function.body);
         try gen.flush();
         _ = gen.locals.pop();
@@ -3455,7 +3681,10 @@ const Generator = struct {
         try gen.line("}}", .{});
     }
 
-    const ChosenArm = struct { value: []const u8, wire: []const u8 };
+    const ChosenArm = struct {
+        value: []const u8,
+        wire: []const u8,
+    };
 
     /// A conditional prop whose test is not reactive but one of whose arms is: the value
     /// and the wire as the server picks them. Null when the test is reactive (a wire
@@ -3502,7 +3731,10 @@ const Generator = struct {
     fn prop_list_loop(gen: *Generator, e: *const ExpressionIR, prop: Field, function: anytype) Error!void {
         const parameter = function.parameters[0];
         const capture = try gen.fresh("list_wire");
-        const subject: Lowered = .{ .code = try std.fmt.allocPrint(gen.arena, "props.{f}", .{std.zig.fmtId(prop.name)}), .type = prop.type };
+        const subject: Lowered = .{
+            .code = try std.fmt.allocPrint(gen.arena, "props.{f}", .{std.zig.fmtId(prop.name)}),
+            .type = prop.type,
+        };
         gen.props_used = true;
 
         try gen.flush();
@@ -3512,7 +3744,13 @@ const Generator = struct {
             fn emit(inner: *Generator, args: anytype) Error!void {
                 try inner.reactive_rows(args.e, args.prop, args.function, args.capture, args.subject);
             }
-        }.emit, .{ .e = e, .prop = prop, .function = function, .capture = capture, .subject = subject });
+        }.emit, .{
+            .e = e,
+            .prop = prop,
+            .function = function,
+            .capture = capture,
+            .subject = subject,
+        });
 
         if (reactive) |arm| {
             try gen.line("if (props.publr_bind_{s}) |{s}| {{", .{ prop.name, capture });
@@ -3522,12 +3760,17 @@ const Generator = struct {
             gen.indent += 1;
         }
         const item_type: Type = switch (prop.type) {
-            .array => |fields| .{ .item = fields },
+            .array => |fields| .{
+                .item = fields,
+            },
             else => .string,
         };
         try gen.line("for ({s}) |{s}| {{", .{ subject.code, parameter });
         gen.indent += 1;
-        try gen.locals.append(gen.arena, .{ .name = parameter, .type = item_type });
+        try gen.locals.append(gen.arena, .{
+            .name = parameter,
+            .type = item_type,
+        });
         try gen.child_expression(function.body);
         try gen.flush();
         _ = gen.locals.pop();
@@ -3539,7 +3782,10 @@ const Generator = struct {
         }
     }
 
-    const Arm = struct { body: []const u8, blocks: []const u8 };
+    const Arm = struct {
+        body: []const u8,
+        blocks: []const u8,
+    };
 
     /// Runs `emit` into fresh buffers at `indent`; the code it wrote when it lowered, null
     /// (everything it touched put back) when it did not.
@@ -3561,7 +3807,10 @@ const Generator = struct {
             error.Pjsx => false,
             else => return failure,
         };
-        const arm: Arm = .{ .body = gen.body.written(), .blocks = gen.blocks.written() };
+        const arm: Arm = .{
+            .body = gen.body.written(),
+            .blocks = gen.blocks.written(),
+        };
 
         gen.body = saved_body;
         gen.blocks = saved_blocks;
@@ -3618,7 +3867,10 @@ const Generator = struct {
             if (entry.expression == expr) return entry.name;
         }
         const name = try std.fmt.allocPrint(gen.arena, "{s}-{d}", .{ gen.module.name, gen.templates.items.len });
-        try gen.templates.append(gen.arena, .{ .expression = expr, .name = name });
+        try gen.templates.append(gen.arena, .{
+            .expression = expr,
+            .name = name,
+        });
         return name;
     }
 
@@ -3680,7 +3932,9 @@ const Generator = struct {
 
     fn seeded_rows(gen: *Generator, subject: Lowered, function: anytype) Error!void {
         const item_type: Type = switch (subject.type) {
-            .array => |fields| .{ .item = fields },
+            .array => |fields| .{
+                .item = fields,
+            },
             .strings => .string,
             else => return gen.fail("a seeded list needs an array", .{}),
         };
@@ -3689,7 +3943,10 @@ const Generator = struct {
         try gen.line("for ({s}, 0..) |{s}, {s}| {{", .{ subject.code, parameter, index });
         gen.indent += 1;
         try gen.line("_ = &{s};", .{index});
-        try gen.locals.append(gen.arena, .{ .name = parameter, .type = item_type });
+        try gen.locals.append(gen.arena, .{
+            .name = parameter,
+            .type = item_type,
+        });
         var key_code: []const u8 = index;
         if (function.body.* == .node and function.body.node.node.* == .element) {
             for (function.body.node.node.element.attributes) |attr| {
@@ -3729,7 +3986,10 @@ const Generator = struct {
             const binding = try gen.fresh("value");
             try gen.line("if ({s}) |{s}| {{", .{ lowered.code, binding });
             gen.indent += 1;
-            try gen.write_value(.{ .code = binding, .type = lowered.type.unwrapped() });
+            try gen.write_value(.{
+                .code = binding,
+                .type = lowered.type.unwrapped(),
+            });
             try gen.flush();
             gen.indent -= 1;
             try gen.line("}}", .{});
@@ -3761,7 +4021,10 @@ const Generator = struct {
     // the wire is emitted without an SSR initial value; an own-module wire
     // renders its seed or initial-state value alongside.
 
-    const Wired = struct { spec: []const u8, own: bool };
+    const Wired = struct {
+        spec: []const u8,
+        own: bool,
+    };
 
     /// `state.a.b` → the dotted path, empty for the state object itself;
     /// null when the expression is not a state member chain.
@@ -3771,13 +4034,22 @@ const Generator = struct {
                 for (gen.wire_aliases.items) |alias| {
                     if (std.mem.eql(u8, alias, reference_ir.name)) {
                         for (gen.locals.items) |local| {
-                            if (std.mem.eql(u8, local.name, alias)) return .{ .spec = alias, .own = true };
+                            if (std.mem.eql(u8, local.name, alias)) return .{
+                                .spec = alias,
+                                .own = true,
+                            };
                         }
-                        return .{ .spec = alias, .own = false };
+                        return .{
+                            .spec = alias,
+                            .own = false,
+                        };
                     }
                 }
                 if (reference_ir.source == .state) {
-                    return .{ .spec = "", .own = true };
+                    return .{
+                        .spec = "",
+                        .own = true,
+                    };
                 }
                 if (reference_ir.source != .local) return null;
                 for (gen.locals.items) |local| {
@@ -3785,12 +4057,18 @@ const Generator = struct {
                 }
                 if (gen.module.wire) |wire| {
                     if (wire.kind == .family and wire.state_name != null and std.mem.eql(u8, wire.state_name.?, reference_ir.name)) {
-                        return .{ .spec = "", .own = true };
+                        return .{
+                            .spec = "",
+                            .own = true,
+                        };
                     }
                 }
                 if (gen.foreign) |foreign| {
                     if (foreign.state_local) |state| {
-                        if (std.mem.eql(u8, state, reference_ir.name)) return .{ .spec = "", .own = false };
+                        if (std.mem.eql(u8, state, reference_ir.name)) return .{
+                            .spec = "",
+                            .own = false,
+                        };
                     }
                 }
                 return null;
@@ -3800,7 +4078,10 @@ const Generator = struct {
                 if (member.object.* == .member) {
                     const stores = member.object.member;
                     if (stores.property == .string and std.mem.eql(u8, stores.property.string, "stores") and stores.object.* == .reference and std.mem.eql(u8, stores.object.reference.name, "Publr")) {
-                        return .{ .spec = std.fmt.allocPrint(gen.arena, "{s}::", .{member.property.string}) catch return null, .own = false };
+                        return .{
+                            .spec = std.fmt.allocPrint(gen.arena, "{s}::", .{member.property.string}) catch return null,
+                            .own = false,
+                        };
                     }
                 }
                 const base = gen.wire_state_path(member.object) orelse return null;
@@ -3810,7 +4091,10 @@ const Generator = struct {
                     member.property.string
                 else
                     std.fmt.allocPrint(gen.arena, "{s}.{s}", .{ base.spec, member.property.string }) catch return null;
-                return .{ .spec = path, .own = base.own };
+                return .{
+                    .spec = path,
+                    .own = base.own,
+                };
             },
             else => return null,
         }
@@ -3869,7 +4153,10 @@ const Generator = struct {
     fn wire_spec(gen: *Generator, e: *const ExpressionIR) Error!?Wired {
         if (gen.wire_state_path(e)) |path| {
             if (path.spec.len == 0) return null; // the bare state object is not a wire
-            return .{ .spec = try std.fmt.allocPrint(gen.arena, "${s}", .{path.spec}), .own = path.own };
+            return .{
+                .spec = try std.fmt.allocPrint(gen.arena, "${s}", .{path.spec}),
+                .own = path.own,
+            };
         }
 
         switch (e.*) {
@@ -3916,12 +4203,18 @@ const Generator = struct {
                     try joined.writer.writeAll(operand);
                 }
                 if (!any_wire) return null;
-                return .{ .spec = joined.written(), .own = own };
+                return .{
+                    .spec = joined.written(),
+                    .own = own,
+                };
             },
             .unary => |unary| {
                 if (!std.mem.eql(u8, unary.operator, "!")) return null;
                 const inner = (try gen.wire_spec(unary.argument)) orelse return null;
-                return .{ .spec = try gen.invert_wire(inner.spec), .own = inner.own };
+                return .{
+                    .spec = try gen.invert_wire(inner.spec),
+                    .own = inner.own,
+                };
             },
             // `state.values.includes(Publr.dataset("value"))` → membership.
             .call => |call| {
@@ -3980,9 +4273,15 @@ const Generator = struct {
 
     /// One arm of a ternary wire: a literal, or a wire in parentheses.
     fn wire_arm(gen: *Generator, e: *const ExpressionIR) Error!?Wired {
-        if (try gen.wire_literal(e)) |literal| return .{ .spec = literal, .own = false };
+        if (try gen.wire_literal(e)) |literal| return .{
+            .spec = literal,
+            .own = false,
+        };
         const wired = (try gen.wire_spec(e)) orelse return null;
-        return .{ .spec = try std.fmt.allocPrint(gen.arena, "({s})", .{wired.spec}), .own = wired.own };
+        return .{
+            .spec = try std.fmt.allocPrint(gen.arena, "({s})", .{wired.spec}),
+            .own = wired.own,
+        };
     }
 
     /// Preserve numeric negation: NaN makes !(a <= b) differ from a > b.
@@ -4019,10 +4318,16 @@ const Generator = struct {
 
         if (when_true.len == 0 and when_false.len == 0) return null;
         if (when_true.len != 0 and when_false.len != 0) {
-            return .{ .spec = try std.fmt.allocPrint(gen.arena, "{s} -> {s} ~ {s}", .{ test_wire.spec, when_true, when_false }), .own = test_wire.own };
+            return .{
+                .spec = try std.fmt.allocPrint(gen.arena, "{s} -> {s} ~ {s}", .{ test_wire.spec, when_true, when_false }),
+                .own = test_wire.own,
+            };
         }
         if (when_true.len != 0) {
-            return .{ .spec = try std.fmt.allocPrint(gen.arena, "{s} -> {s}", .{ test_wire.spec, when_true }), .own = test_wire.own };
+            return .{
+                .spec = try std.fmt.allocPrint(gen.arena, "{s} -> {s}", .{ test_wire.spec, when_true }),
+                .own = test_wire.own,
+            };
         }
         return .{
             .spec = try std.fmt.allocPrint(gen.arena, "{s} -> {s}", .{ try gen.invert_wire(test_wire.spec), when_false }),
@@ -4051,7 +4356,12 @@ const Generator = struct {
         classes,
     };
 
-    const Const = union(enum) { string: []const u8, boolean: bool, number: f64, absent };
+    const Const = union(enum) {
+        string: []const u8,
+        boolean: bool,
+        number: f64,
+        absent,
+    };
 
     const PropEval = union(enum) {
         constant: Const,
@@ -4059,7 +4369,10 @@ const Generator = struct {
         spec: []const u8,
     };
 
-    const Assigned = struct { name: []const u8, value: Const };
+    const Assigned = struct {
+        name: []const u8,
+        value: Const,
+    };
 
     /// Enums larger than this are unbounded operands, not matched per value.
     const prop_domain_max = 24;
@@ -4114,12 +4427,18 @@ const Generator = struct {
         var values: std.ArrayList(Const) = .empty;
         switch (field.type.unwrapped()) {
             .boolean => {
-                try values.append(gen.arena, .{ .boolean = true });
-                try values.append(gen.arena, .{ .boolean = false });
+                try values.append(gen.arena, .{
+                    .boolean = true,
+                });
+                try values.append(gen.arena, .{
+                    .boolean = false,
+                });
             },
             .enumeration => |e| {
                 if (e.values.len > prop_domain_max) return null;
-                for (e.values) |tag| try values.append(gen.arena, .{ .string = tag });
+                for (e.values) |tag| try values.append(gen.arena, .{
+                    .string = tag,
+                });
             },
             else => return null,
         }
@@ -4217,7 +4536,10 @@ const Generator = struct {
         const domain = (try gen.prop_domain(field)).?;
         var subs = try gen.arena.alloc([]const u8, domain.len);
         for (domain, 0..) |value, index| {
-            try assignment.append(gen.arena, .{ .name = field.name, .value = value });
+            try assignment.append(gen.arena, .{
+                .name = field.name,
+                .value = value,
+            });
             defer _ = assignment.pop();
             subs[index] = (try gen.prop_tree(e, finite, assignment, classes)) orelse return null;
         }
@@ -4316,19 +4638,33 @@ const Generator = struct {
     fn prop_eval(gen: *Generator, e: *const ExpressionIR, assignment: []const Assigned, depth: u32) Error!?PropEval {
         if (depth > 16) return null;
         switch (e.*) {
-            .literal => |literal| return .{ .constant = switch (literal) {
-                .string => |text| .{ .string = text },
-                .number => |n| .{ .number = n },
-                .boolean => |b| .{ .boolean = b },
-                .null => .absent,
-            } },
-            .absent => return .{ .constant = .absent },
+            .literal => |literal| return .{
+                .constant = switch (literal) {
+                    .string => |text| .{
+                        .string = text,
+                    },
+                    .number => |n| .{
+                        .number = n,
+                    },
+                    .boolean => |b| .{
+                        .boolean = b,
+                    },
+                    .null => .absent,
+                },
+            },
+            .absent => return .{
+                .constant = .absent,
+            },
             .reference => |reference_ir| switch (reference_ir.source) {
                 .prop => {
                     for (assignment) |assigned| {
-                        if (std.mem.eql(u8, assigned.name, reference_ir.name)) return .{ .constant = assigned.value };
+                        if (std.mem.eql(u8, assigned.name, reference_ir.name)) return .{
+                            .constant = assigned.value,
+                        };
                     }
-                    return .{ .spec = try std.fmt.allocPrint(gen.arena, "rt.wire_value(arena, props.publr_bind_{s}, props.{f})", .{ reference_ir.name, std.zig.fmtId(reference_ir.name) }) };
+                    return .{
+                        .spec = try std.fmt.allocPrint(gen.arena, "rt.wire_value(arena, props.publr_bind_{s}, props.{f})", .{ reference_ir.name, std.zig.fmtId(reference_ir.name) }),
+                    };
                 },
                 .local => {
                     const initializer = gen.binding_of(reference_ir.name) orelse return null;
@@ -4341,23 +4677,41 @@ const Generator = struct {
                 const entries = gen.finite_map_named(member.object.reference.name) orelse return null;
                 const key: Const = switch (member.property) {
                     .string => return null,
-                    .number => |n| .{ .number = n },
+                    .number => |n| .{
+                        .number = n,
+                    },
                     .expression => |key_expr| switch ((try gen.prop_eval(key_expr, assignment, depth + 1)) orelse return null) {
                         .constant => |c| c,
                         .spec => return null,
                     },
                 };
-                if (key != .string) return .{ .constant = .absent };
-                return .{ .constant = if (finite_value(entries, key.string)) |value| .{ .string = value } else .absent };
+                if (key != .string) return .{
+                    .constant = .absent,
+                };
+                return .{
+                    .constant = if (finite_value(entries, key.string)) |value| .{
+                        .string = value,
+                    } else .absent,
+                };
             },
             .unary => |unary| {
                 const argument = (try gen.prop_eval(unary.argument, assignment, depth + 1)) orelse return null;
                 if (std.mem.eql(u8, unary.operator, "!")) return switch (argument) {
-                    .constant => |c| .{ .constant = .{ .boolean = !const_truthy(c) } },
-                    .spec => |code| .{ .spec = try std.fmt.allocPrint(gen.arena, "rt.concat(arena, &.{{ \"not \", rt.wire_group(arena, {s}) }})", .{code}) },
+                    .constant => |c| .{
+                        .constant = .{
+                            .boolean = !const_truthy(c),
+                        },
+                    },
+                    .spec => |code| .{
+                        .spec = try std.fmt.allocPrint(gen.arena, "rt.concat(arena, &.{{ \"not \", rt.wire_group(arena, {s}) }})", .{code}),
+                    },
                 };
                 if (std.mem.eql(u8, unary.operator, "-") and argument == .constant and argument.constant == .number) {
-                    return .{ .constant = .{ .number = -argument.constant.number } };
+                    return .{
+                        .constant = .{
+                            .number = -argument.constant.number,
+                        },
+                    };
                 }
                 return null;
             },
@@ -4380,30 +4734,46 @@ const Generator = struct {
 
                 if (equality or inequality) {
                     if (left == .constant and right == .constant) {
-                        return .{ .constant = .{ .boolean = const_equal(left.constant, right.constant) == equality } };
+                        return .{
+                            .constant = .{
+                                .boolean = const_equal(left.constant, right.constant) == equality,
+                            },
+                        };
                     }
                     if (left == .spec and right == .spec) return null;
                     const spec = if (left == .spec) left.spec else right.spec;
                     const other = if (left == .spec) right.constant else left.constant;
                     const literal = (try gen.const_wire_text(other)) orelse return null;
-                    return .{ .spec = try std.fmt.allocPrint(gen.arena, "rt.concat(arena, &.{{ rt.wire_group(arena, {s}), {s} }})", .{
-                        spec,
-                        try zig_string(gen.arena, try std.fmt.allocPrint(gen.arena, " {s} {s}", .{ if (equality) "==" else "!=", literal })),
-                    }) };
+                    return .{
+                        .spec = try std.fmt.allocPrint(gen.arena, "rt.concat(arena, &.{{ rt.wire_group(arena, {s}), {s} }})", .{
+                            spec,
+                            try zig_string(gen.arena, try std.fmt.allocPrint(gen.arena, " {s} {s}", .{ if (equality) "==" else "!=", literal })),
+                        }),
+                    };
                 }
 
                 if (std.mem.eql(u8, operator, "+")) {
                     if (left == .constant and right == .constant) {
-                        if (left.constant == .number and right.constant == .number) return .{ .constant = .{ .number = left.constant.number + right.constant.number } };
+                        if (left.constant == .number and right.constant == .number) return .{
+                            .constant = .{
+                                .number = left.constant.number + right.constant.number,
+                            },
+                        };
                         if (left.constant == .string and right.constant == .string) {
-                            return .{ .constant = .{ .string = try std.fmt.allocPrint(gen.arena, "{s}{s}", .{ left.constant.string, right.constant.string }) } };
+                            return .{
+                                .constant = .{
+                                    .string = try std.fmt.allocPrint(gen.arena, "{s}{s}", .{ left.constant.string, right.constant.string }),
+                                },
+                            };
                         }
                         return null;
                     }
-                    return .{ .spec = try std.fmt.allocPrint(gen.arena, "rt.concat(arena, &.{{ {s}, \" + \", {s} }})", .{
-                        (try gen.prop_operand(left)) orelse return null,
-                        (try gen.prop_operand(right)) orelse return null,
-                    }) };
+                    return .{
+                        .spec = try std.fmt.allocPrint(gen.arena, "rt.concat(arena, &.{{ {s}, \" + \", {s} }})", .{
+                            (try gen.prop_operand(left)) orelse return null,
+                            (try gen.prop_operand(right)) orelse return null,
+                        }),
+                    };
                 }
                 return null;
             },
@@ -4419,7 +4789,9 @@ const Generator = struct {
                                 .constant => |value| if (value == .absent) "null" else try zig_string(gen.arena, (try gen.const_wire_text(value)) orelse return null),
                             };
                         }
-                        return .{ .spec = try std.fmt.allocPrint(gen.arena, "rt.wire_match(arena, {s}, &.{{ .{{ .key = \"true\", .value = {s} }}, .{{ .key = \"false\", .value = {s} }} }})", .{ code, arms[0], arms[1] }) };
+                        return .{
+                            .spec = try std.fmt.allocPrint(gen.arena, "rt.wire_match(arena, {s}, &.{{ .{{ .key = \"true\", .value = {s} }}, .{{ .key = \"false\", .value = {s} }} }})", .{ code, arms[0], arms[1] }),
+                        };
                     },
                 }
             },
@@ -4429,7 +4801,11 @@ const Generator = struct {
                 var all_constant = true;
                 for (template_ir.parts) |part| {
                     const value: PropEval = switch (part) {
-                        .string => |literal| .{ .constant = .{ .string = literal } },
+                        .string => |literal| .{
+                            .constant = .{
+                                .string = literal,
+                            },
+                        },
                         .expression => |part_expr| (try gen.prop_eval(part_expr, assignment, depth + 1)) orelse return null,
                     };
                     switch (value) {
@@ -4441,23 +4817,33 @@ const Generator = struct {
                         .spec => |code| {
                             all_constant = false;
                             if (text.written().len > 0) {
-                                try operands.append(gen.arena, try zig_string(gen.arena, (try gen.const_wire_text(.{ .string = text.written() })) orelse return null));
+                                try operands.append(gen.arena, try zig_string(gen.arena, (try gen.const_wire_text(.{
+                                    .string = text.written(),
+                                })) orelse return null));
                                 text = .init(gen.arena);
                             }
                             try operands.append(gen.arena, try std.fmt.allocPrint(gen.arena, "rt.wire_group(arena, {s})", .{code}));
                         },
                     }
                 }
-                if (all_constant) return .{ .constant = .{ .string = text.written() } };
+                if (all_constant) return .{
+                    .constant = .{
+                        .string = text.written(),
+                    },
+                };
                 if (text.written().len > 0) {
-                    try operands.append(gen.arena, try zig_string(gen.arena, (try gen.const_wire_text(.{ .string = text.written() })) orelse return null));
+                    try operands.append(gen.arena, try zig_string(gen.arena, (try gen.const_wire_text(.{
+                        .string = text.written(),
+                    })) orelse return null));
                 }
                 var joined: std.Io.Writer.Allocating = .init(gen.arena);
                 for (operands.items, 0..) |operand, index| {
                     if (index > 0) try joined.writer.writeAll(" \" + \",");
                     try joined.writer.print(" {s},", .{operand});
                 }
-                return .{ .spec = try std.fmt.allocPrint(gen.arena, "rt.concat(arena, &.{{{s} }})", .{joined.written()}) };
+                return .{
+                    .spec = try std.fmt.allocPrint(gen.arena, "rt.concat(arena, &.{{{s} }})", .{joined.written()}),
+                };
             },
             else => return null,
         }
@@ -4480,13 +4866,22 @@ const Generator = struct {
     fn expression_value(gen: *Generator, e: *const ExpressionIR) Error!Lowered {
         switch (e.*) {
             .literal => |literal| return switch (literal) {
-                .string => |s| .{ .code = try zig_string(gen.arena, s), .type = .string },
+                .string => |s| .{
+                    .code = try zig_string(gen.arena, s),
+                    .type = .string,
+                },
                 .number => |number| .{
                     .code = if (std.math.isNan(number)) "std.math.nan(f64)" else if (std.math.isInf(number)) (if (number > 0) "std.math.inf(f64)" else "(-std.math.inf(f64))") else if (number == 0 and std.math.signbit(number)) "@as(f64, -0.0)" else try std.fmt.allocPrint(gen.arena, "@as(f64, {d})", .{number}),
                     .type = .number,
                 },
-                .boolean => |b| .{ .code = if (b) "true" else "false", .type = .boolean },
-                .null => .{ .code = "null", .type = .null },
+                .boolean => |b| .{
+                    .code = if (b) "true" else "false",
+                    .type = .boolean,
+                },
+                .null => .{
+                    .code = "null",
+                    .type = .null,
+                },
             },
             .call => |call| {
                 if (call.callee.* == .reference) {
@@ -4504,10 +4899,17 @@ const Generator = struct {
                         for (function.parameters, args.items) |parameter, argument| {
                             const local = try gen.fresh("arg");
                             try prefix.writer.print("const {s} = {s}; _ = &{s}; ", .{ local, argument.code, local });
-                            try gen.locals.append(gen.arena, .{ .name = local, .source_name = parameter, .type = argument.type });
+                            try gen.locals.append(gen.arena, .{
+                                .name = local,
+                                .source_name = parameter,
+                                .type = argument.type,
+                            });
                         }
                         const result = try gen.expression(function.body);
-                        return .{ .code = try std.fmt.allocPrint(gen.arena, "{s}: {{ {s}break :{s} {s}; }}", .{ label, prefix.written(), label, result.code }), .type = result.type };
+                        return .{
+                            .code = try std.fmt.allocPrint(gen.arena, "{s}: {{ {s}break :{s} {s}; }}", .{ label, prefix.written(), label, result.code }),
+                            .type = result.type,
+                        };
                     }
                 }
                 // The publr-dom render helpers with exact runtime twins.
@@ -4544,12 +4946,17 @@ const Generator = struct {
 
                         const subject = try gen.expression(callee_member.object);
                         const item_type: Type = switch (subject.type) {
-                            .array => |item_fields| .{ .item = item_fields },
+                            .array => |item_fields| .{
+                                .item = item_fields,
+                            },
                             .strings => .string,
                             else => return gen.fail("findIndex on a {s} is not lowered", .{@tagName(subject.type)}),
                         };
 
-                        try gen.locals.append(gen.arena, .{ .name = parameter, .type = item_type });
+                        try gen.locals.append(gen.arena, .{
+                            .name = parameter,
+                            .type = item_type,
+                        });
                         const predicate = try gen.truthy(try gen.expression(function.body));
                         _ = gen.locals.pop();
 
@@ -4603,13 +5010,19 @@ const Generator = struct {
             .array => |array| {
                 if (array.items.len == 0) {
                     if (array.asserted) |spec| if (spec.fields != null) return gen.asserted_array(e, spec);
-                    return .{ .code = "&.{}", .type = .strings };
+                    return .{
+                        .code = "&.{}",
+                        .type = .strings,
+                    };
                 }
                 return gen.fail("a non-empty array literal is not lowered", .{});
             },
             // `undefined` — an absent value; lowers exactly like the null literal
             // (`x === undefined` → a null check, an absent attribute is omitted).
-            .absent => return .{ .code = "null", .type = .null },
+            .absent => return .{
+                .code = "null",
+                .type = .null,
+            },
             .reference => |reference_ir| return gen.reference(reference_ir.name, reference_ir.source),
             .member => |member| {
                 if (is_publr_request(member)) {
@@ -4626,7 +5039,9 @@ const Generator = struct {
                         }
                         return .{
                             .code = try std.fmt.allocPrint(gen.arena, "{s}[@intFromFloat({s})]", .{ object.code, index.code }),
-                            .type = .{ .item = object.type.array },
+                            .type = .{
+                                .item = object.type.array,
+                            },
                         };
                     }
 
@@ -4657,7 +5072,10 @@ const Generator = struct {
                     // `TONES[kind]` keyed by a string: an optional string,
                     // null when no entry matches (`TONES[kind] ?? "accent"`).
                     if (key.type == .string) {
-                        return .{ .code = try gen.string_keyed_lookup(object.type.finite_map, key.code, null, null), .type = .opt_string };
+                        return .{
+                            .code = try gen.string_keyed_lookup(object.type.finite_map, key.code, null, null),
+                            .type = .opt_string,
+                        };
                     }
 
                     if (key.type != .enumeration) {
@@ -4666,11 +5084,13 @@ const Generator = struct {
 
                     return .{
                         .code = "",
-                        .type = .{ .finite = .{
-                            .entries = object.type.finite_map,
-                            .key_code = key.code,
-                            .key_enum = key.type.enumeration,
-                        } },
+                        .type = .{
+                            .finite = .{
+                                .entries = object.type.finite_map,
+                                .key_code = key.code,
+                                .key_enum = key.type.enumeration,
+                            },
+                        },
                     };
                 }
 
@@ -4713,7 +5133,10 @@ const Generator = struct {
                     if (argument.type != .union_value) {
                         return gen.fail("`typeof` on a {s} is not lowered", .{@tagName(argument.type)});
                     }
-                    return .{ .code = argument.code, .type = .union_typeof };
+                    return .{
+                        .code = argument.code,
+                        .type = .union_typeof,
+                    };
                 }
 
                 if (std.mem.eql(u8, unary.operator, "-")) {
@@ -4760,7 +5183,10 @@ const Generator = struct {
             .code = try std.fmt.allocPrint(gen.arena, "@as({s}, &.{{}})", .{fields[0].zig_type}),
             .type = fields[0].type,
         };
-        try gen.asserted_arrays.append(gen.arena, .{ .expression = e, .lowered = lowered });
+        try gen.asserted_arrays.append(gen.arena, .{
+            .expression = e,
+            .lowered = lowered,
+        });
         return lowered;
     }
 
@@ -4787,7 +5213,9 @@ const Generator = struct {
         return .{
             .code = "@as(*const Request, @ptrCast(@alignCast(props.publr_request orelse " ++
                 "@panic(\"Publr.request read in a render handed no request\")))).*",
-            .type = .{ .item = gen.request },
+            .type = .{
+                .item = gen.request,
+            },
         };
     }
 
@@ -4805,13 +5233,19 @@ const Generator = struct {
             },
             // A component-local `reactive()`'s state is referenced as source
             // "state"; a family's state is a plain local bound by import.
-            .state => return .{ .code = "", .type = .state_root },
+            .state => return .{
+                .code = "",
+                .type = .state_root,
+            },
             .local => {
                 var index = gen.locals.items.len;
                 while (index > 0) {
                     index -= 1;
                     if (std.mem.eql(u8, gen.locals.items[index].source_name orelse gen.locals.items[index].name, name)) {
-                        return .{ .code = gen.locals.items[index].name, .type = gen.locals.items[index].type };
+                        return .{
+                            .code = gen.locals.items[index].name,
+                            .type = gen.locals.items[index].type,
+                        };
                     }
                 }
 
@@ -4819,16 +5253,25 @@ const Generator = struct {
                     // Inside a closure (a list's row) the module's own state is
                     // a plain local of its exported name.
                     if (wire.state_name) |state| {
-                        if (std.mem.eql(u8, state, name)) return .{ .code = "", .type = .state_root };
+                        if (std.mem.eql(u8, state, name)) return .{
+                            .code = "",
+                            .type = .state_root,
+                        };
                     }
                     for (wire.actions) |action| {
                         if (std.mem.eql(u8, action, name)) {
-                            return .{ .code = try zig_string(gen.arena, name), .type = .action_name };
+                            return .{
+                                .code = try zig_string(gen.arena, name),
+                                .type = .action_name,
+                            };
                         }
                     }
                     for (wire.refs) |ref| {
                         if (std.mem.eql(u8, ref, name)) {
-                            return .{ .code = ref, .type = .ref_name };
+                            return .{
+                                .code = ref,
+                                .type = .ref_name,
+                            };
                         }
                     }
                 }
@@ -4836,35 +5279,58 @@ const Generator = struct {
                 if (gen.foreign) |foreign| {
                     if (foreign.state_local) |state| {
                         if (std.mem.eql(u8, state, name)) {
-                            return .{ .code = "", .type = .state_root };
+                            return .{
+                                .code = "",
+                                .type = .state_root,
+                            };
                         }
                     }
                     for (foreign.actions) |action| {
                         if (std.mem.eql(u8, action.local, name)) {
-                            return .{ .code = try zig_string(gen.arena, action.name), .type = .action_name };
+                            return .{
+                                .code = try zig_string(gen.arena, action.name),
+                                .type = .action_name,
+                            };
                         }
                     }
                     for (foreign.refs) |ref| {
                         if (std.mem.eql(u8, ref.local, name)) {
-                            return .{ .code = ref.name, .type = .ref_name };
+                            return .{
+                                .code = ref.name,
+                                .type = .ref_name,
+                            };
                         }
                     }
                 }
 
                 for (gen.module.finite_maps) |map| {
                     if (std.mem.eql(u8, map.name, name)) {
-                        return .{ .code = "", .type = .{ .finite_map = map.entries } };
+                        return .{
+                            .code = "",
+                            .type = .{
+                                .finite_map = map.entries,
+                            },
+                        };
                     }
                 }
 
                 for (gen.module.string_constants) |constant| {
                     if (std.mem.eql(u8, constant.key, name)) {
-                        return .{ .code = try zig_string(gen.arena, constant.value), .type = .string };
+                        return .{
+                            .code = try zig_string(gen.arena, constant.value),
+                            .type = .string,
+                        };
                     }
                 }
 
-                if (std.mem.eql(u8, name, "NaN")) return .{ .code = "std.math.nan(f64)", .type = .number };
-                if (std.mem.eql(u8, name, "Infinity")) return .{ .code = "std.math.inf(f64)", .type = .number };
+                if (std.mem.eql(u8, name, "NaN")) return .{
+                    .code = "std.math.nan(f64)",
+                    .type = .number,
+                };
+                if (std.mem.eql(u8, name, "Infinity")) return .{
+                    .code = "std.math.inf(f64)",
+                    .type = .number,
+                };
                 return gen.fail("reference to unknown local \"{s}\"", .{name});
             },
             else => return gen.fail("reference to {s} \"{s}\" is not lowered", .{ @tagName(source), name }),
@@ -4898,11 +5364,17 @@ const Generator = struct {
 
         if (std.mem.eql(u8, operator, "&&") or std.mem.eql(u8, operator, "||")) {
             if (left.type == .boolean and right.type == .boolean) {
-                return .{ .code = try std.fmt.allocPrint(gen.arena, "({s} {s} {s})", .{ left.code, if (std.mem.eql(u8, operator, "&&")) @as([]const u8, "and") else "or", right.code }), .type = .boolean };
+                return .{
+                    .code = try std.fmt.allocPrint(gen.arena, "({s} {s} {s})", .{ left.code, if (std.mem.eql(u8, operator, "&&")) @as([]const u8, "and") else "or", right.code }),
+                    .type = .boolean,
+                };
             }
             const binding = try gen.fresh("logical");
             const label = try gen.fresh("select");
-            const saved = Lowered{ .code = binding, .type = left.type };
+            const saved = Lowered{
+                .code = binding,
+                .type = left.type,
+            };
             const is_and = std.mem.eql(u8, operator, "&&");
             const right_is_node = right.type == .node or right.type == .opt_node;
             const left_is_node = left.type == .node or left.type == .opt_node;
@@ -4910,7 +5382,10 @@ const Generator = struct {
             // `flag && node`: markup when the guard holds, nothing otherwise, as JSX
             // renders a false child as nothing.
             if (is_and and right_is_node and !left_is_node) {
-                const nothing = Lowered{ .code = "null", .type = .null };
+                const nothing = Lowered{
+                    .code = "null",
+                    .type = .null,
+                };
                 const guarded = try gen.select(try gen.truthy(saved), right, nothing);
                 return .{
                     .code = try std.fmt.allocPrint(gen.arena, "{s}: {{ const {s} = {s}; break :{s} {s}; }}", .{ label, binding, left.code, label, guarded.code }),
@@ -4949,7 +5424,10 @@ const Generator = struct {
         }
 
         if (std.mem.eql(u8, operator, "%") and left.type == .number and right.type == .number) {
-            return .{ .code = try std.fmt.allocPrint(gen.arena, "rt.number_rem({s}, {s})", .{ left.code, right.code }), .type = .number };
+            return .{
+                .code = try std.fmt.allocPrint(gen.arena, "rt.number_rem({s}, {s})", .{ left.code, right.code }),
+                .type = .number,
+            };
         }
 
         const arithmetic = std.mem.eql(u8, operator, "+") or std.mem.eql(u8, operator, "-") or
@@ -5070,7 +5548,9 @@ const Generator = struct {
                 .number => .opt_number,
                 .boolean => .opt_boolean,
                 .node => .opt_node,
-                .enumeration => |e| .{ .opt_enumeration = e },
+                .enumeration => |e| .{
+                    .opt_enumeration = e,
+                },
                 // Already optional (a prop that may be absent): null is one of its values.
                 .opt_string, .opt_number, .opt_boolean, .opt_node, .opt_enumeration => present.type,
                 else => return gen.fail("a conditional mixes null with a {s}", .{@tagName(present.type)}),
@@ -5120,7 +5600,9 @@ const Generator = struct {
                 .expression => |part_expr| part_expr,
             };
 
-            const lowered = if (own) switch ((try gen.own_initial(part_expr)) orelse OwnInitial{ .lowered = try gen.expression(part_expr) }) {
+            const lowered = if (own) switch ((try gen.own_initial(part_expr)) orelse OwnInitial{
+                .lowered = try gen.expression(part_expr),
+            }) {
                 .lowered => |initial| initial,
                 .unservable => return null,
             } else try gen.expression(part_expr);
@@ -5205,7 +5687,10 @@ const Generator = struct {
 
         try out.writer.writeAll(" })");
 
-        return .{ .code = out.written(), .type = .string };
+        return .{
+            .code = out.written(),
+            .type = .string,
+        };
     }
 
     /// `TONES[kind]` keyed by a string: a labeled block comparing the key

@@ -49,7 +49,11 @@ pub const Result = struct {
 const Str = []const u8;
 const StrList = std.ArrayList(Str);
 const NodeList = std.ArrayList(*Node);
-const Edit = struct { start: u32, end: u32, text: Str };
+const Edit = struct {
+    start: u32,
+    end: u32,
+    text: Str,
+};
 const Range = [2]u32;
 
 const key_names = [_][2]Str{
@@ -94,9 +98,18 @@ fn lessNode(_: void, a: *Node, b: *Node) bool {
     return a.start < b.start;
 }
 
-const ForInfo = struct { binder: Str, src: Str };
-const Layer = struct { static: bool, text: Str };
-const Emitted = struct { code: Str, key: ?Str };
+const ForInfo = struct {
+    binder: Str,
+    src: Str,
+};
+const Layer = struct {
+    static: bool,
+    text: Str,
+};
+const Emitted = struct {
+    code: Str,
+    key: ?Str,
+};
 
 pub fn transformPjsx(allocator: Allocator, source: []const u8, opts: Options) Error!Result {
     const filename = opts.filename orelse "component.ptsx";
@@ -238,7 +251,11 @@ const Transformer = struct {
         if (t == .JSXIdentifier or t == .JSXMemberExpression) return;
         if (t == .Identifier) {
             if (!shadow.has(node.name)) if (prop_map.get(node.name)) |text| {
-                try self.ident_edits.append(self.a, .{ .start = node.start, .end = node.end, .text = text });
+                try self.ident_edits.append(self.a, .{
+                    .start = node.start,
+                    .end = node.end,
+                    .text = text,
+                });
             };
             return;
         }
@@ -256,7 +273,11 @@ const Transformer = struct {
         const ta: Str = if (pattern.type_annotation) |ta| self.src(ta.start, ta.end) else "";
 
         if (pattern.type == .Identifier) {
-            try self.ident_edits.append(self.a, .{ .start = parameter.start, .end = parameter.end, .text = try util.concat(self.a, &.{ prop_alias, ta, fallback }) });
+            try self.ident_edits.append(self.a, .{
+                .start = parameter.start,
+                .end = parameter.end,
+                .text = try util.concat(self.a, &.{ prop_alias, ta, fallback }),
+            });
             try prop_map.put(pattern.name, prop_alias);
             try self.rewriteBody(fn_node.body.?, &prop_map);
             return;
@@ -353,7 +374,11 @@ const Transformer = struct {
         return try self.f("({s})", .{try self.textFor(inner)});
     }
 
-    const MapMatch = struct { target: *Node, arrow: *Node, row: *Node };
+    const MapMatch = struct {
+        target: *Node,
+        arrow: *Node,
+        row: *Node,
+    };
 
     fn matchMap(e: *Node) ?MapMatch {
         if (e.type != .CallExpression) return null;
@@ -364,7 +389,11 @@ const Transformer = struct {
         const body = arrow.body.?;
         if (body.type != .BlockStatement) {
             const row = ast.unparen(body);
-            if (row.isJsx()) return .{ .target = callee.object.?, .arrow = arrow, .row = row };
+            if (row.isJsx()) return .{
+                .target = callee.object.?,
+                .arrow = arrow,
+                .row = row,
+            };
             return null;
         }
         // A block body whose last statement returns the row: the statements
@@ -373,7 +402,11 @@ const Transformer = struct {
         const last = body.statements[body.statements.len - 1];
         if (last.type != .ReturnStatement or last.argument == null) return null;
         const row = ast.unparen(last.argument.?);
-        if (row.isJsx()) return .{ .target = callee.object.?, .arrow = arrow, .row = row };
+        if (row.isJsx()) return .{
+            .target = callee.object.?,
+            .arrow = arrow,
+            .row = row,
+        };
         return null;
     }
 
@@ -516,7 +549,10 @@ const Transformer = struct {
         return null;
     }
 
-    const OptionParts = struct { label: Str, value: Str };
+    const OptionParts = struct {
+        label: Str,
+        value: Str,
+    };
 
     fn optionParts(self: *Transformer, option: *Node, expected_name: Str) Error!?OptionParts {
         const name = jsxElementName(option) orelse return null;
@@ -539,7 +575,10 @@ const Transformer = struct {
         else
             null;
         if (label == null) return null;
-        return .{ .label = label.?, .value = value.? };
+        return .{
+            .label = label.?,
+            .value = value.?,
+        };
     }
 
     fn emitOptionEntries(self: *Transformer, option_name: Str, children: []*Node) Error!?Str {
@@ -626,11 +665,17 @@ const Transformer = struct {
             const kids = try self.emitChildren(node.children);
             if (self.root_fragments.contains(node.start)) {
                 try self.used.put("h", {});
-                return .{ .code = try self.f("h(\"p-fragment\", {{ style: \"display:contents\" }}{s})", .{if (kids.len > 0) try self.f(", {s}", .{try util.join(self.a, kids, ", ")}) else ""}), .key = null };
+                return .{
+                    .code = try self.f("h(\"p-fragment\", {{ style: \"display:contents\" }}{s})", .{if (kids.len > 0) try self.f(", {s}", .{try util.join(self.a, kids, ", ")}) else ""}),
+                    .key = null,
+                };
             }
             try self.used.put("Fragment", {});
             const code = if (kids.len > 0) try self.f("Fragment({{ children: [{s}] }})", .{try util.join(self.a, kids, ", ")}) else try self.f("Fragment({{}})", .{});
-            return .{ .code = code, .key = null };
+            return .{
+                .code = code,
+                .key = null,
+            };
         }
 
         const opening = node.opening_element.?;
@@ -718,7 +763,10 @@ const Transformer = struct {
                 if (literal_string != null) {
                     try target.append(self.a, try self.f("\"data-p-class\": {s}", .{try self.slice(value.?.start, value.?.end)}));
                 } else {
-                    try class_layers.append(self.a, .{ .static = false, .text = expr_text orelse "undefined" });
+                    try class_layers.append(self.a, .{
+                        .static = false,
+                        .text = expr_text orelse "undefined",
+                    });
                 }
                 continue;
             }
@@ -792,23 +840,44 @@ const Transformer = struct {
             // Regular JSX attribute.
             if (util.eql(name, "class") and intrinsic) {
                 if (value == null) {
-                    try class_layers.append(self.a, .{ .static = true, .text = "\"\"" });
+                    try class_layers.append(self.a, .{
+                        .static = true,
+                        .text = "\"\"",
+                    });
                 } else if (value.?.type == .Literal) {
-                    try class_layers.append(self.a, .{ .static = true, .text = try self.slice(value.?.start, value.?.end) });
+                    try class_layers.append(self.a, .{
+                        .static = true,
+                        .text = try self.slice(value.?.start, value.?.end),
+                    });
                 } else if (expr != null and isStaticLiteral(expr.?)) {
-                    try class_layers.append(self.a, .{ .static = true, .text = expr_text.? });
+                    try class_layers.append(self.a, .{
+                        .static = true,
+                        .text = expr_text.?,
+                    });
                 } else {
-                    try class_layers.append(self.a, .{ .static = false, .text = expr_text orelse "undefined" });
+                    try class_layers.append(self.a, .{
+                        .static = false,
+                        .text = expr_text orelse "undefined",
+                    });
                 }
                 continue;
             }
             if (util.eql(name, "class")) {
                 if (value == null) {
-                    try class_layers.append(self.a, .{ .static = true, .text = "\"\"" });
+                    try class_layers.append(self.a, .{
+                        .static = true,
+                        .text = "\"\"",
+                    });
                 } else if (value.?.type == .Literal) {
-                    try class_layers.append(self.a, .{ .static = true, .text = try self.slice(value.?.start, value.?.end) });
+                    try class_layers.append(self.a, .{
+                        .static = true,
+                        .text = try self.slice(value.?.start, value.?.end),
+                    });
                 } else if (expr) |e| {
-                    try class_layers.append(self.a, .{ .static = isStaticLiteral(e), .text = expr_text.? });
+                    try class_layers.append(self.a, .{
+                        .static = isStaticLiteral(e),
+                        .text = expr_text.?,
+                    });
                 }
                 continue;
             }
@@ -914,7 +983,10 @@ const Transformer = struct {
             try self.used.put("list", {});
             core = try self.f("list(() => ({s}), ({s}, $i) => ({s}), ({s}, $i) => {s})", .{ fi.src, fi.binder, key_expr orelse "$i", fi.binder, core });
         }
-        return .{ .code = core, .key = key_expr };
+        return .{
+            .code = core,
+            .key = key_expr,
+        };
     }
 
     /// Object literal in oxc codegen shape: 0/1 properties inline, more one per line.
@@ -988,7 +1060,10 @@ const Transformer = struct {
             }
         };
         var found = false;
-        ast.walk(node, Ctx{ .name = name, .found = &found }, Ctx.visit) catch return false;
+        ast.walk(node, Ctx{
+            .name = name,
+            .found = &found,
+        }, Ctx.visit) catch return false;
         return found;
     }
 
@@ -1095,11 +1170,23 @@ const Transformer = struct {
         for (names.items) |name| if (!taken.has(name) and !forwarded.has(name)) try private_locals.append(self.a, name);
         const fn_body = root.body orelse return errAt("a family root needs a function body", root);
         if (private_locals.items.len > 0)
-            try self.ident_edits.append(self.a, .{ .start = fn_body.start + 1, .end = fn_body.start + 1, .text = try self.f("\n  const {{ {s} }} = {s}.current();", .{ try util.join(self.a, private_locals.items, ", "), family }) });
+            try self.ident_edits.append(self.a, .{
+                .start = fn_body.start + 1,
+                .end = fn_body.start + 1,
+                .text = try self.f("\n  const {{ {s} }} = {s}.current();", .{ try util.join(self.a, private_locals.items, ", "), family }),
+            });
         for (self.program.statements) |statement| {
             if (statement.type == .ExportNamedDeclaration and statement.declaration == root) {
-                try self.ident_edits.append(self.a, .{ .start = statement.start, .end = root.id.?.end, .text = try self.f("export const {s} = {s}.root(function {s}", .{ root_name, family, root_name }) });
-                try self.ident_edits.append(self.a, .{ .start = root.end, .end = root.end, .text = ");" });
+                try self.ident_edits.append(self.a, .{
+                    .start = statement.start,
+                    .end = root.id.?.end,
+                    .text = try self.f("export const {s} = {s}.root(function {s}", .{ root_name, family, root_name }),
+                });
+                try self.ident_edits.append(self.a, .{
+                    .start = root.end,
+                    .end = root.end,
+                    .text = ");",
+                });
             }
         }
 
@@ -1125,9 +1212,17 @@ const Transformer = struct {
             if (!in_root and !self.removed(edit.start, edit.end)) try overwrites.append(self.a, edit);
         }
         for (roots.items) |root| {
-            try overwrites.append(self.a, .{ .start = root.start, .end = root.end, .text = (try self.emitJsx(root)).code });
+            try overwrites.append(self.a, .{
+                .start = root.start,
+                .end = root.end,
+                .text = (try self.emitJsx(root)).code,
+            });
         }
-        for (self.remove_ranges.items) |range| try overwrites.append(self.a, .{ .start = range[0], .end = range[1], .text = "" });
+        for (self.remove_ranges.items) |range| try overwrites.append(self.a, .{
+            .start = range[0],
+            .end = range[1],
+            .text = "",
+        });
         std.mem.sort(Edit, overwrites.items, {}, lessEdit);
 
         var out: std.ArrayList(u8) = .empty;
@@ -1148,7 +1243,10 @@ const Transformer = struct {
             const import_line = try self.f("import * as {s} from {s};\n", .{ self.runtime_name, try self.json(opts.runtime_import orelse "publr/dom") });
             code = try util.concat(self.a, &.{ import_line, code });
         }
-        return .{ .code = code, .map = null };
+        return .{
+            .code = code,
+            .map = null,
+        };
     }
 
     fn removed(self: *Transformer, start: u32, end: u32) bool {
@@ -1175,7 +1273,9 @@ const testing = std.testing;
 /// The reference tests observe `transformPjsxToDom` output (canonicalize →
 /// transform → type strip with oxc's paren normalisation); mirror that.
 fn transformTest(a: Allocator, source: Str, filename: Str) !Str {
-    const result = try @import("dom.zig").transformPjsxToDom(a, source, .{ .filename = filename });
+    const result = try @import("dom.zig").transformPjsxToDom(a, source, .{
+        .filename = filename,
+    });
     return result.code;
 }
 

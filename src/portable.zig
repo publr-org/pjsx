@@ -51,7 +51,9 @@ pub const Target = struct {
     compile: *const fn (std.mem.Allocator, *const Program, Options) Error![]const u8,
 };
 
-pub const Options = struct { runtime_import: []const u8 = "publr/dom" };
+pub const Options = struct {
+    runtime_import: []const u8 = "publr/dom",
+};
 
 pub const Program = struct {
     module: *const compiler.ModuleIR,
@@ -154,20 +156,26 @@ pub const Program = struct {
     fn expr(p: *Program, e: *const Expr) Error!Type {
         if (p.types.get(e)) |t| return t;
         const t: Type = switch (e.*) {
-            .literal => |v| .{ .kind = switch (v) {
-                .number => .number,
-                .string => .string,
-                .boolean => .boolean,
-                .null => .null,
-            } },
-            .absent => .{ .kind = .undefined },
+            .literal => |v| .{
+                .kind = switch (v) {
+                    .number => .number,
+                    .string => .string,
+                    .boolean => .boolean,
+                    .null => .null,
+                },
+            },
+            .absent => .{
+                .kind = .undefined,
+            },
             .reference => |r| blk: {
                 if (r.source == .prop) {
                     const prop = p.module.component.props.get(r.name) orelse return p.fail("unknown prop");
                     break :blk try p.propType(prop);
                 }
                 if (p.locals.get(r.name)) |t| break :blk t;
-                if (util.eql(r.name, "NaN") or util.eql(r.name, "Infinity")) break :blk .{ .kind = .number };
+                if (util.eql(r.name, "NaN") or util.eql(r.name, "Infinity")) break :blk .{
+                    .kind = .number,
+                };
                 return p.fail(try util.fmt(p.allocator, "reference '{s}'", .{r.name}));
             },
             .member => blk: {
@@ -176,7 +184,9 @@ pub const Program = struct {
             },
             .unary => |u| blk: {
                 const argument = try p.expr(u.argument);
-                if (util.eql(u.operator, "!")) break :blk .{ .kind = .boolean };
+                if (util.eql(u.operator, "!")) break :blk .{
+                    .kind = .boolean,
+                };
                 if (util.eql(u.operator, "-") and argument.kind == .number and !argument.optional) break :blk argument;
                 return p.fail("unary operation");
             },
@@ -194,10 +204,14 @@ pub const Program = struct {
                 } else if (util.eql(o.operator, "===") or util.eql(o.operator, "!==")) {
                     op = if (util.eql(o.operator, "===")) .equal else .not_equal;
                     if (left.kind != right.kind or left.optional or right.optional) return p.fail("strict equality across optional or different value types");
-                    result = .{ .kind = .boolean };
+                    result = .{
+                        .kind = .boolean,
+                    };
                 } else if (left.kind == .number and right.kind == .number and !left.optional and !right.optional) {
                     op = if (util.eql(o.operator, "+")) .number_add else if (util.eql(o.operator, "-")) .number_subtract else if (util.eql(o.operator, "*")) .number_multiply else if (util.eql(o.operator, "/")) .number_divide else if (util.eql(o.operator, "%")) .number_remainder else if (util.eql(o.operator, "<")) .number_less else if (util.eql(o.operator, "<=")) .number_less_equal else if (util.eql(o.operator, ">")) .number_greater else if (util.eql(o.operator, ">=")) .number_greater_equal else return p.fail("numeric operator");
-                    if (op == .number_less or op == .number_less_equal or op == .number_greater or op == .number_greater_equal) result = .{ .kind = .boolean };
+                    if (op == .number_less or op == .number_less_equal or op == .number_greater or op == .number_greater_equal) result = .{
+                        .kind = .boolean,
+                    };
                 } else if (left.kind == .string and right.kind == .string and !left.optional and !right.optional and util.eql(o.operator, "+")) {
                     op = .string_concat;
                 } else return p.fail("operator requiring implicit coercion");
@@ -209,20 +223,33 @@ pub const Program = struct {
                 const yes = try p.expr(c.consequent);
                 const no = try p.expr(c.alternate);
                 if (yes.kind != no.kind) {
-                    if (yes.kind == .null or yes.kind == .undefined) break :blk .{ .kind = no.kind, .optional = true };
-                    if (no.kind == .null or no.kind == .undefined) break :blk .{ .kind = yes.kind, .optional = true };
+                    if (yes.kind == .null or yes.kind == .undefined) break :blk .{
+                        .kind = no.kind,
+                        .optional = true,
+                    };
+                    if (no.kind == .null or no.kind == .undefined) break :blk .{
+                        .kind = yes.kind,
+                        .optional = true,
+                    };
                     return p.fail("conditional branches with different value types");
                 }
-                break :blk .{ .kind = yes.kind, .optional = yes.optional or no.optional };
+                break :blk .{
+                    .kind = yes.kind,
+                    .optional = yes.optional or no.optional,
+                };
             },
             .template => |t| blk: {
                 for (t.parts) |part| if (part == .expression) {
                     const value = try p.expr(part.expression);
                     if (value.optional or (value.kind != .number and value.kind != .string)) return p.fail("template interpolation of non-number/string values");
                 };
-                break :blk .{ .kind = .string };
+                break :blk .{
+                    .kind = .string,
+                };
             },
-            .function => .{ .kind = .function },
+            .function => .{
+                .kind = .function,
+            },
             .call => |c| blk: {
                 if (c.callee.* == .reference) {
                     const name = c.callee.reference.name;
@@ -258,11 +285,15 @@ pub const Program = struct {
                     if (value.kind != .number or value.optional) return p.fail("non-numeric Math operand");
                 }
                 try p.operations.put(p.allocator, e, if (util.eql(m.property.string, "min")) .number_min else .number_max);
-                break :blk .{ .kind = .number };
+                break :blk .{
+                    .kind = .number,
+                };
             },
             .node => |n| blk: {
                 try p.node(n.node);
-                break :blk .{ .kind = .node };
+                break :blk .{
+                    .kind = .node,
+                };
             },
             else => return p.fail(try util.fmt(p.allocator, "expression {s}", .{@tagName(e.*)})),
         };
@@ -279,7 +310,10 @@ pub const Program = struct {
             else => return p.fail("non-scalar prop contract"),
         };
         if (prop.default_expression != null and prop.default == null) return p.fail("executable parameter default");
-        return .{ .kind = kind, .optional = (prop.optional or prop.type == .optional_number or prop.type == .optional_string or prop.type == .optional_boolean) and prop.default == null };
+        return .{
+            .kind = kind,
+            .optional = (prop.optional or prop.type == .optional_number or prop.type == .optional_string or prop.type == .optional_boolean) and prop.default == null,
+        };
     }
 
     fn node(p: *Program, n: *const Node) Error!void {
@@ -397,7 +431,14 @@ fn prepareImpl(a: std.mem.Allocator, source: []const u8, filename: []const u8, r
     const copy = try a.create(compiler.ModuleIR);
     copy.* = module.*;
     copy.semantics_version = semantics.version;
-    var p = Program{ .module = copy, .server_extensions = server, .allocator = a, .locals = .init(a), .active_helpers = .init(a), .signatures = .init(a) };
+    var p = Program{
+        .module = copy,
+        .server_extensions = server,
+        .allocator = a,
+        .locals = .init(a),
+        .active_helpers = .init(a),
+        .signatures = .init(a),
+    };
     if (server) {
         if (copy.component.reactive != null) return p.fail("non-family reactive store");
         if (copy.component.family) |family| {
@@ -420,13 +461,22 @@ fn prepareImpl(a: std.mem.Allocator, source: []const u8, filename: []const u8, r
 }
 
 pub fn zigTarget() Target {
-    return .{ .name = "zig", .compile = emitZig };
+    return .{
+        .name = "zig",
+        .compile = emitZig,
+    };
 }
 pub fn phpTarget() Target {
-    return .{ .name = "php", .compile = @import("targets/php.zig").emit };
+    return .{
+        .name = "php",
+        .compile = @import("targets/php.zig").emit,
+    };
 }
 pub fn domTarget() Target {
-    return .{ .name = "js-dom", .compile = emitDom };
+    return .{
+        .name = "js-dom",
+        .compile = emitDom,
+    };
 }
 
 fn emitZig(a: std.mem.Allocator, p: *const Program, _: Options) Error![]const u8 {
@@ -436,7 +486,11 @@ fn emitZig(a: std.mem.Allocator, p: *const Program, _: Options) Error![]const u8
 /// DOM generation consumes exactly the validated IR used by SSR. Original
 /// source is used only by the browser-only transform, never by this emitter.
 fn emitDom(a: std.mem.Allocator, p: *const Program, options: Options) Error![]const u8 {
-    var e = DomEmitter{ .a = a, .program = p, .out = .init(a) };
+    var e = DomEmitter{
+        .a = a,
+        .program = p,
+        .out = .init(a),
+    };
     const w = &e.out.writer;
     try w.print("import * as $$dom from {s};\nexport function {s}(props) {{\n", .{ try util.jsonString(a, options.runtime_import), p.module.component.name });
     for (p.module.component.snapshots, 0..) |name, i| {
@@ -461,7 +515,10 @@ const DomEmitter = struct {
     a: std.mem.Allocator,
     program: *const Program,
     out: std.Io.Writer.Allocating,
-    parameters: std.ArrayList(struct { name: []const u8, code: []const u8 }) = .empty,
+    parameters: std.ArrayList(struct {
+        name: []const u8,
+        code: []const u8,
+    }) = .empty,
     counter: usize = 0,
 
     fn expr(e: *DomEmitter, x: *const Expr) Error!void {
@@ -559,7 +616,10 @@ const DomEmitter = struct {
                     if (i != 0) try w.writeAll(", ");
                     e.counter += 1;
                     const name = try util.fmt(e.a, "arg{d}", .{e.counter});
-                    try e.parameters.append(e.a, .{ .name = parameter, .code = name });
+                    try e.parameters.append(e.a, .{
+                        .name = parameter,
+                        .code = name,
+                    });
                     try w.writeAll(name);
                 }
                 try w.writeAll(") => (");

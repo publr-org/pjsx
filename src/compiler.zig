@@ -51,7 +51,10 @@ pub const LiteralIR = union(enum) {
     null,
 };
 
-pub const ReferenceIR = struct { name: []const u8, source: ReferenceSource };
+pub const ReferenceIR = struct {
+    name: []const u8,
+    source: ReferenceSource,
+};
 
 pub const MemberProperty = union(enum) {
     string: []const u8,
@@ -64,35 +67,93 @@ pub const TemplatePart = union(enum) {
     expression: *const ExpressionIR,
 };
 
-pub const ObjectFieldIR = struct { name: []const u8, value: *const ExpressionIR };
+pub const ObjectFieldIR = struct {
+    name: []const u8,
+    value: *const ExpressionIR,
+};
 
 pub const ExpressionIR = union(enum) {
     literal: LiteralIR,
     reference: ReferenceIR,
-    member: struct { object: *const ExpressionIR, property: MemberProperty },
-    unary: struct { operator: []const u8, argument: *const ExpressionIR },
-    operation: struct { operator: []const u8, left: *const ExpressionIR, right: *const ExpressionIR },
-    conditional: struct { @"test": *const ExpressionIR, consequent: *const ExpressionIR, alternate: *const ExpressionIR },
-    template: struct { parts: []const TemplatePart },
+    member: struct {
+        object: *const ExpressionIR,
+        property: MemberProperty,
+    },
+    unary: struct {
+        operator: []const u8,
+        argument: *const ExpressionIR,
+    },
+    operation: struct {
+        operator: []const u8,
+        left: *const ExpressionIR,
+        right: *const ExpressionIR,
+    },
+    conditional: struct {
+        @"test": *const ExpressionIR,
+        consequent: *const ExpressionIR,
+        alternate: *const ExpressionIR,
+    },
+    template: struct {
+        parts: []const TemplatePart,
+    },
     /// `asserted` is the array's TypeScript assertion (`[] as Row[]`) as an
     /// array prop schema, so an empty literal keeps its item type.
-    array: struct { items: []const *const ExpressionIR, asserted: ?*const analyze.PropSchema = null },
-    object: struct { fields: []const ObjectFieldIR },
-    call: struct { callee: *const ExpressionIR, arguments: []const *const ExpressionIR },
-    function: struct { parameters: []const []const u8, body: *const ExpressionIR, locals: []const LocalIR = &.{} },
-    node: struct { node: *const NodeIR },
+    array: struct {
+        items: []const *const ExpressionIR,
+        asserted: ?*const analyze.PropSchema = null,
+    },
+    object: struct {
+        fields: []const ObjectFieldIR,
+    },
+    call: struct {
+        callee: *const ExpressionIR,
+        arguments: []const *const ExpressionIR,
+    },
+    function: struct {
+        parameters: []const []const u8,
+        body: *const ExpressionIR,
+        locals: []const LocalIR = &.{},
+    },
+    node: struct {
+        node: *const NodeIR,
+    },
     absent,
-    unsupported: struct { feature: []const u8 },
+    unsupported: struct {
+        feature: []const u8,
+    },
 };
 
 /// How the attribute value was authored: `name`, `name="str"`, `name={…}`.
 pub const AttributeForm = enum { bare, literal, expression };
 
 pub const AttributeIR = union(enum) {
-    attribute: struct { name: []const u8, form: AttributeForm, value: *const ExpressionIR, action_name: ?[]const u8 = null, source_index: usize = 0 },
-    behavior: struct { name: []const u8, form: AttributeForm, value: *const ExpressionIR, source_index: usize = 0 },
-    event: struct { event: []const u8, modifiers: []const []const u8, form: AttributeForm, value: *const ExpressionIR, action_name: ?[]const u8 = null, source_index: usize = 0 },
-    binding: struct { name: []const u8, form: AttributeForm, value: *const ExpressionIR, source_index: usize = 0 },
+    attribute: struct {
+        name: []const u8,
+        form: AttributeForm,
+        value: *const ExpressionIR,
+        action_name: ?[]const u8 = null,
+        source_index: usize = 0,
+    },
+    behavior: struct {
+        name: []const u8,
+        form: AttributeForm,
+        value: *const ExpressionIR,
+        source_index: usize = 0,
+    },
+    event: struct {
+        event: []const u8,
+        modifiers: []const []const u8,
+        form: AttributeForm,
+        value: *const ExpressionIR,
+        action_name: ?[]const u8 = null,
+        source_index: usize = 0,
+    },
+    binding: struct {
+        name: []const u8,
+        form: AttributeForm,
+        value: *const ExpressionIR,
+        source_index: usize = 0,
+    },
 
     pub fn value(self: AttributeIR) *const ExpressionIR {
         return switch (self) {
@@ -102,34 +163,73 @@ pub const AttributeIR = union(enum) {
 };
 
 pub const ElementNameIR = union(enum) {
-    intrinsic: struct { name: []const u8 },
-    component: struct { name: []const u8 },
-    member: struct { path: []const []const u8 },
+    intrinsic: struct {
+        name: []const u8,
+    },
+    component: struct {
+        name: []const u8,
+    },
+    member: struct {
+        path: []const []const u8,
+    },
 };
 
 pub const NodeIR = union(enum) {
-    element: struct { site: usize = 0, name: ElementNameIR, attributes: []const AttributeIR, self_closing: bool, children: []const *const NodeIR },
-    fragment: struct { children: []const *const NodeIR },
-    text: struct { value: []const u8 },
-    expression: struct { site: usize = 0, value: *const ExpressionIR },
+    element: struct {
+        site: usize = 0,
+        name: ElementNameIR,
+        attributes: []const AttributeIR,
+        self_closing: bool,
+        children: []const *const NodeIR,
+    },
+    fragment: struct {
+        children: []const *const NodeIR,
+    },
+    text: struct {
+        value: []const u8,
+    },
+    expression: struct {
+        site: usize = 0,
+        value: *const ExpressionIR,
+    },
 };
 
-pub const ImportNameIR = struct { imported: []const u8, local: []const u8, type_only: bool };
-pub const ImportIR = struct { source: []const u8, names: []const ImportNameIR };
+pub const ImportNameIR = struct {
+    imported: []const u8,
+    local: []const u8,
+    type_only: bool,
+};
+pub const ImportIR = struct {
+    source: []const u8,
+    names: []const ImportNameIR,
+};
 
 /// A family seed assignment (`state.x = expr`), carried as an IR expression
 /// for SSR targets — the wire format serializes these under `extensions`.
-pub const SeedIR = struct { field: []const u8, value: *const ExpressionIR };
+pub const SeedIR = struct {
+    field: []const u8,
+    value: *const ExpressionIR,
+};
 /// One initial-state field; a null value is unservable (a getter, or an
 /// expression the IR cannot carry) — an SSR target renders wire-only there.
-pub const InitialIR = struct { field: []const u8, value: ?*const ExpressionIR };
+pub const InitialIR = struct {
+    field: []const u8,
+    value: ?*const ExpressionIR,
+};
 /// The client half of a reactive module: its `Publr.createLocalStore(...)`
 /// registration, type-stripped, ready to serve.
-pub const StoreRegistrationIR = struct { name: []const u8, code: []const u8 };
+pub const StoreRegistrationIR = struct {
+    name: []const u8,
+    code: []const u8,
+};
 
 /// Ordered component bindings. Initializers execute once before rendering.
 /// The source offset is in the canonical TSX source retained by analysis.
-pub const LocalIR = struct { name: []const u8, value: *const ExpressionIR, start: usize };
+pub const LocalIR = struct {
+    name: []const u8,
+    value: *const ExpressionIR,
+    start: usize,
+};
 
 pub const ReactiveIR = struct {
     store: []const u8,
@@ -230,87 +330,160 @@ fn expressionIR(allocator: Allocator, node: *Node, parsed: *const analyze.Parsed
     switch (value.type) {
         .Literal => {
             const literal: ?LiteralIR = switch (value.value) {
-                .string => |s| .{ .string = s },
-                .number => |n| .{ .number = n },
-                .boolean => |b| .{ .boolean = b },
+                .string => |s| .{
+                    .string = s,
+                },
+                .number => |n| .{
+                    .number = n,
+                },
+                .boolean => |b| .{
+                    .boolean = b,
+                },
                 .null => .null,
                 else => null,
             };
-            if (literal) |l| return box(allocator, .{ .literal = l });
-            return box(allocator, .{ .unsupported = .{ .feature = "literal" } });
+            if (literal) |l| return box(allocator, .{
+                .literal = l,
+            });
+            return box(allocator, .{
+                .unsupported = .{
+                    .feature = "literal",
+                },
+            });
         },
         .Identifier => {
             if (util.eql(value.name, "undefined")) return box(allocator, .absent);
             if (bindings.get(value.name)) |prop| {
-                if (!util.eql(prop, "$props")) return box(allocator, .{ .reference = .{ .name = prop, .source = .prop } });
+                if (!util.eql(prop, "$props")) return box(allocator, .{
+                    .reference = .{
+                        .name = prop,
+                        .source = .prop,
+                    },
+                });
             }
             if (parsed.component.reactive) |reactive| {
                 if (util.eql(value.name, reactive.state_name)) {
-                    return box(allocator, .{ .reference = .{ .name = value.name, .source = .state } });
+                    return box(allocator, .{
+                        .reference = .{
+                            .name = value.name,
+                            .source = .state,
+                        },
+                    });
                 }
             }
-            return box(allocator, .{ .reference = .{ .name = value.name, .source = .local } });
+            return box(allocator, .{
+                .reference = .{
+                    .name = value.name,
+                    .source = .local,
+                },
+            });
         },
-        .JSXElement, .JSXFragment => return box(allocator, .{ .node = .{ .node = try nodeIR(allocator, value, parsed) } }),
+        .JSXElement, .JSXFragment => return box(allocator, .{
+            .node = .{
+                .node = try nodeIR(allocator, value, parsed),
+            },
+        }),
         .MemberExpression => {
             const object = value.object.?;
             const prop: ?[]const u8 = if (object.type == .Identifier) bindings.get(object.name) else null;
             if (prop != null and util.eql(prop.?, "$props") and !value.computed and value.property.?.type == .Identifier) {
-                return box(allocator, .{ .reference = .{ .name = value.property.?.name, .source = .prop } });
+                return box(allocator, .{
+                    .reference = .{
+                        .name = value.property.?.name,
+                        .source = .prop,
+                    },
+                });
             }
             const property: MemberProperty = if (value.computed)
-                .{ .expression = try expressionIR(allocator, value.property.?, parsed) }
+                .{
+                    .expression = try expressionIR(allocator, value.property.?, parsed),
+                }
             else
-                .{ .string = try staticName(allocator, value.property) orelse "unknown" };
-            return box(allocator, .{ .member = .{ .object = try expressionIR(allocator, object, parsed), .property = property } });
+                .{
+                    .string = try staticName(allocator, value.property) orelse "unknown",
+                };
+            return box(allocator, .{
+                .member = .{
+                    .object = try expressionIR(allocator, object, parsed),
+                    .property = property,
+                },
+            });
         },
-        .UnaryExpression => return box(allocator, .{ .unary = .{
-            .operator = value.operator,
-            .argument = try expressionIR(allocator, value.argument.?, parsed),
-        } }),
-        .BinaryExpression, .LogicalExpression => return box(allocator, .{ .operation = .{
-            .operator = value.operator,
-            .left = try expressionIR(allocator, value.left.?, parsed),
-            .right = try expressionIR(allocator, value.right.?, parsed),
-        } }),
-        .ConditionalExpression => return box(allocator, .{ .conditional = .{
-            .@"test" = try expressionIR(allocator, value.test_.?, parsed),
-            .consequent = try expressionIR(allocator, value.consequent.?, parsed),
-            .alternate = try expressionIR(allocator, value.alternate.?, parsed),
-        } }),
+        .UnaryExpression => return box(allocator, .{
+            .unary = .{
+                .operator = value.operator,
+                .argument = try expressionIR(allocator, value.argument.?, parsed),
+            },
+        }),
+        .BinaryExpression, .LogicalExpression => return box(allocator, .{
+            .operation = .{
+                .operator = value.operator,
+                .left = try expressionIR(allocator, value.left.?, parsed),
+                .right = try expressionIR(allocator, value.right.?, parsed),
+            },
+        }),
+        .ConditionalExpression => return box(allocator, .{
+            .conditional = .{
+                .@"test" = try expressionIR(allocator, value.test_.?, parsed),
+                .consequent = try expressionIR(allocator, value.consequent.?, parsed),
+                .alternate = try expressionIR(allocator, value.alternate.?, parsed),
+            },
+        }),
         .TemplateLiteral => {
             var parts: std.ArrayList(TemplatePart) = .empty;
             for (value.quasis, 0..) |quasi, index| {
-                try parts.append(allocator, .{ .string = quasi.cooked orelse "" });
+                try parts.append(allocator, .{
+                    .string = quasi.cooked orelse "",
+                });
                 if (index < value.expressions.len) {
-                    try parts.append(allocator, .{ .expression = try expressionIR(allocator, value.expressions[index], parsed) });
+                    try parts.append(allocator, .{
+                        .expression = try expressionIR(allocator, value.expressions[index], parsed),
+                    });
                 }
             }
-            return box(allocator, .{ .template = .{ .parts = try parts.toOwnedSlice(allocator) } });
+            return box(allocator, .{
+                .template = .{
+                    .parts = try parts.toOwnedSlice(allocator),
+                },
+            });
         },
         .ArrayExpression => {
             var items: std.ArrayList(*const ExpressionIR) = .empty;
             for (value.elements) |element| {
                 if (element) |item| try items.append(allocator, try expressionIR(allocator, item, parsed));
             }
-            return box(allocator, .{ .array = .{ .items = try items.toOwnedSlice(allocator), .asserted = try assertedArray(allocator, node, parsed) } });
+            return box(allocator, .{
+                .array = .{
+                    .items = try items.toOwnedSlice(allocator),
+                    .asserted = try assertedArray(allocator, node, parsed),
+                },
+            });
         },
         .ObjectExpression => {
             var fields: std.ArrayList(ObjectFieldIR) = .empty;
             for (value.properties) |field| {
                 if (field.type != .Property or field.computed) continue;
                 const name = try staticName(allocator, field.key) orelse continue;
-                try fields.append(allocator, .{ .name = name, .value = try expressionIR(allocator, field.value_node.?, parsed) });
+                try fields.append(allocator, .{
+                    .name = name,
+                    .value = try expressionIR(allocator, field.value_node.?, parsed),
+                });
             }
-            return box(allocator, .{ .object = .{ .fields = try fields.toOwnedSlice(allocator) } });
+            return box(allocator, .{
+                .object = .{
+                    .fields = try fields.toOwnedSlice(allocator),
+                },
+            });
         },
         .CallExpression => {
             var arguments: std.ArrayList(*const ExpressionIR) = .empty;
             for (value.arguments) |argument| try arguments.append(allocator, try expressionIR(allocator, argument, parsed));
-            return box(allocator, .{ .call = .{
-                .callee = try expressionIR(allocator, value.callee.?, parsed),
-                .arguments = try arguments.toOwnedSlice(allocator),
-            } });
+            return box(allocator, .{
+                .call = .{
+                    .callee = try expressionIR(allocator, value.callee.?, parsed),
+                    .arguments = try arguments.toOwnedSlice(allocator),
+                },
+            });
         },
         .ArrowFunctionExpression, .FunctionExpression, .FunctionDeclaration => {
             var scoped = parsed.*;
@@ -328,50 +501,94 @@ fn expressionIR(allocator: Allocator, node: *Node, parsed: *const analyze.Parsed
                         break;
                     }
                     if (statement.type == .FunctionDeclaration and statement.id != null) {
-                        try locals.append(allocator, .{ .name = statement.id.?.name, .value = try expressionIR(allocator, statement, &scoped), .start = statement.start });
+                        try locals.append(allocator, .{
+                            .name = statement.id.?.name,
+                            .value = try expressionIR(allocator, statement, &scoped),
+                            .start = statement.start,
+                        });
                     } else if (statement.type == .VariableDeclaration) {
                         for (statement.declarations) |declaration| {
                             if (declaration.id == null or declaration.id.?.type != .Identifier or declaration.init == null) break;
                             const name = declaration.id.?.name;
                             scoped.component.prop_bindings.remove(name);
-                            try locals.append(allocator, .{ .name = name, .value = try expressionIR(allocator, declaration.init.?, &scoped), .start = declaration.start });
+                            try locals.append(allocator, .{
+                                .name = name,
+                                .value = try expressionIR(allocator, declaration.init.?, &scoped),
+                                .start = declaration.start,
+                            });
                         }
                     } else if (statement.type != .EmptyStatement) break;
                 }
             }
             const body: *const ExpressionIR = if (body_node != null and body_node.?.type == .BlockStatement)
-                try box(allocator, .{ .unsupported = .{ .feature = "statement-function" } })
+                try box(allocator, .{
+                    .unsupported = .{
+                        .feature = "statement-function",
+                    },
+                })
             else
                 try expressionIR(allocator, body_node.?, &scoped);
             var parameters: util.StringList = .empty;
             for (value.params) |parameter| try parameters.append(allocator, try staticName(allocator, parameter) orelse "_");
-            return box(allocator, .{ .function = .{ .parameters = try parameters.toOwnedSlice(allocator), .body = body, .locals = try locals.toOwnedSlice(allocator) } });
+            return box(allocator, .{
+                .function = .{
+                    .parameters = try parameters.toOwnedSlice(allocator),
+                    .body = body,
+                    .locals = try locals.toOwnedSlice(allocator),
+                },
+            });
         },
-        else => return box(allocator, .{ .unsupported = .{ .feature = value.type.name() } }),
+        else => return box(allocator, .{
+            .unsupported = .{
+                .feature = value.type.name(),
+            },
+        }),
     }
 }
 
 fn elementNameIR(allocator: Allocator, node: *Node) Allocator.Error!ElementNameIR {
     if (node.type == .JSXIdentifier) {
-        return if (util.startsWithUpper(node.name)) .{ .component = .{ .name = node.name } } else .{ .intrinsic = .{ .name = node.name } };
+        return if (util.startsWithUpper(node.name)) .{
+            .component = .{
+                .name = node.name,
+            },
+        } else .{
+            .intrinsic = .{
+                .name = node.name,
+            },
+        };
     }
     const path = try memberPath(allocator, node) orelse blk: {
         const unknown = try allocator.alloc([]const u8, 1);
         unknown[0] = "unknown";
         break :blk unknown;
     };
-    return .{ .member = .{ .path = path } };
+    return .{
+        .member = .{
+            .path = path,
+        },
+    };
 }
 
 fn attributeIR(allocator: Allocator, attribute: *Node, parsed: *const analyze.ParsedModule) Error!AttributeIR {
     if (attribute.type == .JSXSpreadAttribute) {
-        return .{ .attribute = .{ .name = "...", .form = .expression, .value = try expressionIR(allocator, attribute.argument.?, parsed) } };
+        return .{
+            .attribute = .{
+                .name = "...",
+                .form = .expression,
+                .value = try expressionIR(allocator, attribute.argument.?, parsed),
+            },
+        };
     }
     const name = try staticName(allocator, attribute.name_node) orelse "unknown";
     const value_node = attribute.value_node;
     const form: AttributeForm = if (value_node == null) .bare else if (value_node.?.type == .Literal) .literal else .expression;
     const value: *const ExpressionIR = if (value_node == null)
-        try box(allocator, .{ .literal = .{ .boolean = true } })
+        try box(allocator, .{
+            .literal = .{
+                .boolean = true,
+            },
+        })
     else if (value_node.?.type == .Literal)
         try expressionIR(allocator, value_node.?, parsed)
     else
@@ -384,17 +601,38 @@ fn attributeIR(allocator: Allocator, attribute: *Node, parsed: *const analyze.Pa
         const event = parts.first();
         var modifiers: util.StringList = .empty;
         while (parts.next()) |modifier| try modifiers.append(allocator, modifier);
-        return .{ .event = .{
-            .action_name = action_name,
-            .event = if (event.len == 0) "unknown" else event,
-            .modifiers = try modifiers.toOwnedSlice(allocator),
+        return .{
+            .event = .{
+                .action_name = action_name,
+                .event = if (event.len == 0) "unknown" else event,
+                .modifiers = try modifiers.toOwnedSlice(allocator),
+                .form = form,
+                .value = value,
+            },
+        };
+    }
+    if (std.mem.startsWith(u8, name, "$$b$")) return .{
+        .binding = .{
+            .name = name[4..],
             .form = form,
             .value = value,
-        } };
-    }
-    if (std.mem.startsWith(u8, name, "$$b$")) return .{ .binding = .{ .name = name[4..], .form = form, .value = value } };
-    if (std.mem.startsWith(u8, name, "$$")) return .{ .behavior = .{ .name = name[2..], .form = form, .value = value } };
-    return .{ .attribute = .{ .name = name, .form = form, .value = value, .action_name = action_name } };
+        },
+    };
+    if (std.mem.startsWith(u8, name, "$$")) return .{
+        .behavior = .{
+            .name = name[2..],
+            .form = form,
+            .value = value,
+        },
+    };
+    return .{
+        .attribute = .{
+            .name = name,
+            .form = form,
+            .value = value,
+            .action_name = action_name,
+        },
+    };
 }
 
 fn childrenIR(allocator: Allocator, children: []*Node, parsed: *const analyze.ParsedModule) Error![]const *const NodeIR {
@@ -403,13 +641,22 @@ fn childrenIR(allocator: Allocator, children: []*Node, parsed: *const analyze.Pa
         if (child.type == .JSXText) {
             const raw = child.value.asString() orelse child.raw;
             const text = try jsxText(allocator, raw);
-            if (text.len > 0) try out.append(allocator, try boxNode(allocator, .{ .text = .{ .value = text } }));
+            if (text.len > 0) try out.append(allocator, try boxNode(allocator, .{
+                .text = .{
+                    .value = text,
+                },
+            }));
             continue;
         }
         if (child.type == .JSXExpressionContainer) {
             const expression = child.expression orelse continue;
             if (expression.type == .JSXEmptyExpression) continue;
-            try out.append(allocator, try boxNode(allocator, .{ .expression = .{ .site = child.start, .value = try expressionIR(allocator, expression, parsed) } }));
+            try out.append(allocator, try boxNode(allocator, .{
+                .expression = .{
+                    .site = child.start,
+                    .value = try expressionIR(allocator, expression, parsed),
+                },
+            }));
             continue;
         }
         try out.append(allocator, try nodeIR(allocator, child, parsed));
@@ -428,21 +675,39 @@ fn nodeIR(allocator: Allocator, node: *Node, parsed: *const analyze.ParsedModule
                 inline else => |*entry| entry.source_index = index,
             }
             if (attr == .attribute and util.eql(attr.attribute.name, "class") and attr.attribute.value.* == .array) {
-                for (attr.attribute.value.array.items) |part| try attributes.append(allocator, .{ .attribute = .{ .name = "class", .form = .expression, .value = part, .source_index = index } });
+                for (attr.attribute.value.array.items) |part| try attributes.append(allocator, .{
+                    .attribute = .{
+                        .name = "class",
+                        .form = .expression,
+                        .value = part,
+                        .source_index = index,
+                    },
+                });
             } else try attributes.append(allocator, attr);
         }
-        return boxNode(allocator, .{ .element = .{
-            .site = value.start,
-            .name = try elementNameIR(allocator, opening.name_node.?),
-            .attributes = try attributes.toOwnedSlice(allocator),
-            .self_closing = opening.self_closing,
-            .children = try childrenIR(allocator, value.children, parsed),
-        } });
+        return boxNode(allocator, .{
+            .element = .{
+                .site = value.start,
+                .name = try elementNameIR(allocator, opening.name_node.?),
+                .attributes = try attributes.toOwnedSlice(allocator),
+                .self_closing = opening.self_closing,
+                .children = try childrenIR(allocator, value.children, parsed),
+            },
+        });
     }
     if (value.type == .JSXFragment) {
-        return boxNode(allocator, .{ .fragment = .{ .children = try childrenIR(allocator, value.children, parsed) } });
+        return boxNode(allocator, .{
+            .fragment = .{
+                .children = try childrenIR(allocator, value.children, parsed),
+            },
+        });
     }
-    return boxNode(allocator, .{ .expression = .{ .site = value.start, .value = try expressionIR(allocator, value, parsed) } });
+    return boxNode(allocator, .{
+        .expression = .{
+            .site = value.start,
+            .value = try expressionIR(allocator, value, parsed),
+        },
+    });
 }
 
 fn behaviorsIR(allocator: Allocator, program: *Node) Allocator.Error![]const []const u8 {
@@ -469,7 +734,10 @@ fn importsIR(allocator: Allocator, program: *Node) Allocator.Error![]const Impor
                 .type_only = statement.import_kind == .type or specifier.import_kind == .type,
             });
         }
-        try out.append(allocator, .{ .source = source, .names = try names.toOwnedSlice(allocator) });
+        try out.append(allocator, .{
+            .source = source,
+            .names = try names.toOwnedSlice(allocator),
+        });
     }
     return out.toOwnedSlice(allocator);
 }
@@ -588,7 +856,10 @@ pub fn createPjsxModuleWithResolver(allocator: Allocator, original_source: []con
     if (parsed.family) |f| {
         var seed_exprs = try allocator.alloc(SeedIR, f.seed_assignments.len);
         for (f.seed_assignments, 0..) |seed, i| {
-            seed_exprs[i] = .{ .field = seed.field, .value = try expressionIR(allocator, seed.value, parsed) };
+            seed_exprs[i] = .{
+                .field = seed.field,
+                .value = try expressionIR(allocator, seed.value, parsed),
+            };
         }
         family = .{
             .store = f.wire_name,
@@ -640,13 +911,19 @@ pub fn createPjsxModuleWithResolver(allocator: Allocator, original_source: []con
     return module;
 }
 
-pub const StringConstant = struct { name: []const u8, value: []const u8 };
+pub const StringConstant = struct {
+    name: []const u8,
+    value: []const u8,
+};
 
 fn stringConstantsIR(allocator: Allocator, program: *Node) Error![]const StringConstant {
     const constants = try analyze.collectStringConstants(allocator, program);
     const list = try allocator.alloc(StringConstant, constants.count());
     for (constants.keys(), constants.values(), 0..) |name, value, index| {
-        list[index] = .{ .name = name, .value = value };
+        list[index] = .{
+            .name = name,
+            .value = value,
+        };
     }
     return list;
 }
@@ -657,7 +934,11 @@ fn localBindingsIR(allocator: Allocator, parsed: *const analyze.ParsedModule) Er
     for (body.statements) |statement| {
         if (statement.type == .ReturnStatement) break;
         if (statement.type == .FunctionDeclaration and statement.id != null) {
-            try locals.append(allocator, .{ .name = statement.id.?.name, .value = try expressionIR(allocator, statement, parsed), .start = statement.start });
+            try locals.append(allocator, .{
+                .name = statement.id.?.name,
+                .value = try expressionIR(allocator, statement, parsed),
+                .start = statement.start,
+            });
             continue;
         }
         if (statement.type != .VariableDeclaration) continue;
@@ -668,7 +949,11 @@ fn localBindingsIR(allocator: Allocator, parsed: *const analyze.ParsedModule) Er
             const id = declaration.id orelse continue;
             const init = declaration.init orelse continue;
             if (id.type != .Identifier or parsed.component.prop_bindings.has(id.name)) continue;
-            try locals.append(allocator, .{ .name = id.name, .value = try expressionIR(allocator, init, parsed), .start = declaration.start });
+            try locals.append(allocator, .{
+                .name = id.name,
+                .value = try expressionIR(allocator, init, parsed),
+                .start = declaration.start,
+            });
         }
     }
     return locals.items;
@@ -697,7 +982,10 @@ fn initialIR(allocator: Allocator, initial_state: *Node, parsed: *const analyze.
             const value_node = property.value_node orelse break :blk null;
             break :blk expressionIR(allocator, value_node, parsed) catch null;
         };
-        try fields.append(allocator, .{ .field = key.name, .value = value });
+        try fields.append(allocator, .{
+            .field = key.name,
+            .value = value,
+        });
     }
     return fields.items;
 }
@@ -786,7 +1074,10 @@ pub fn compilePjsx(comptime Options: type, comptime Output: type, allocator: All
             return err.fail("pjsx: target {s} does not support: {s}", .{ try util.jsonString(allocator, target.name), try util.join(allocator, missing.items, ", ") });
         }
     }
-    const context = CompileContext{ .filename = module.filename, .target_name = target.name };
+    const context = CompileContext{
+        .filename = module.filename,
+        .target_name = target.name,
+    };
     return target.compile(allocator, module, context, options.target_options);
 }
 
@@ -1355,14 +1646,21 @@ const Json = struct {
 /// Stream `JSON.stringify(module)` — the exact shape out-of-process targets
 /// receive — into `writer`. `allocator` only backs transient number formatting.
 pub fn writeJson(allocator: Allocator, module: *const ModuleIR, writer: *std.Io.Writer) Json.WriteError!void {
-    var json = Json{ .allocator = allocator, .out = writer };
+    var json = Json{
+        .allocator = allocator,
+        .out = writer,
+    };
     try json.module(module);
 }
 
 /// Portable IR transport: every numeric payload is a tagged binary64 bit
 /// pattern, including defaults. This never emits invalid JSON for infinities.
 pub fn writeLosslessJson(allocator: Allocator, module: *const ModuleIR, writer: *std.Io.Writer) Json.WriteError!void {
-    var json = Json{ .allocator = allocator, .out = writer, .lossless_numbers = true };
+    var json = Json{
+        .allocator = allocator,
+        .out = writer,
+        .lossless_numbers = true,
+    };
     try json.module(module);
 }
 
@@ -1383,7 +1681,10 @@ pub fn expressionToIR(allocator: Allocator, node: *Node, parsed: *const analyze.
 /// One IR expression as JSON — the same encoding `toJson` uses.
 pub fn expressionToJson(allocator: Allocator, e: *const ExpressionIR) Allocator.Error![]const u8 {
     var out = std.Io.Writer.Allocating.init(allocator);
-    var json = Json{ .allocator = allocator, .out = &out.writer };
+    var json = Json{
+        .allocator = allocator,
+        .out = &out.writer,
+    };
     json.expression(e) catch return error.OutOfMemory;
     return out.toOwnedSlice();
 }
@@ -1425,7 +1726,9 @@ test "a third-party target compiles the public semantic IR without changing PJSX
     var arena = testArena();
     defer arena.deinit();
     const a = arena.allocator();
-    const Options = struct { prefix: []const u8 };
+    const Options = struct {
+        prefix: []const u8,
+    };
     const Manifest = struct {
         fn compile(allocator: Allocator, module: *const ModuleIR, context: CompileContext, options: Options) Error![]const u8 {
             if (!util.eql(context.filename, "badge.pjsx")) return err.failMsg("wrong filename");
@@ -1433,8 +1736,20 @@ test "a third-party target compiles the public semantic IR without changing PJSX
             return util.fmt(allocator, "{s}:{s}:{s}", .{ options.prefix, module.component.name, try util.join(allocator, module.component.props.keys(), ",") });
         }
     };
-    const target = TargetPlugin(Options, []const u8){ .name = "component-manifest", .api_version = 1, .compile = Manifest.compile };
-    const output = try compilePjsx(Options, []const u8, a, .{ .source = badge_source }, .{ .filename = "badge.pjsx", .target = target, .target_options = .{ .prefix = "custom" } });
+    const target = TargetPlugin(Options, []const u8){
+        .name = "component-manifest",
+        .api_version = 1,
+        .compile = Manifest.compile,
+    };
+    const output = try compilePjsx(Options, []const u8, a, .{
+        .source = badge_source,
+    }, .{
+        .filename = "badge.pjsx",
+        .target = target,
+        .target_options = .{
+            .prefix = "custom",
+        },
+    });
     try std.testing.expectEqualStrings("custom:Badge:label", output);
     const module = try createPjsxModule(a, badge_source, "badge.pjsx");
     try std.testing.expect(module.component.root.* == .element);
@@ -1447,8 +1762,18 @@ test "compilePjsx rejects a target on another compiler API version" {
     const Noop = struct {
         fn compile(_: Allocator, _: *const ModuleIR, _: CompileContext, _: void) Error!void {}
     };
-    const target = TargetPlugin(void, void){ .name = "old", .api_version = 2, .compile = Noop.compile };
-    try std.testing.expectError(error.Pjsx, compilePjsx(void, void, a, .{ .source = badge_source }, .{ .filename = "badge.pjsx", .target = target, .target_options = {} }));
+    const target = TargetPlugin(void, void){
+        .name = "old",
+        .api_version = 2,
+        .compile = Noop.compile,
+    };
+    try std.testing.expectError(error.Pjsx, compilePjsx(void, void, a, .{
+        .source = badge_source,
+    }, .{
+        .filename = "badge.pjsx",
+        .target = target,
+        .target_options = {},
+    }));
     try std.testing.expectEqualStrings("pjsx: target \"old\" uses compiler API 2; expected 1", err.message());
 }
 
@@ -1463,8 +1788,19 @@ test "compilePjsx rejects modules needing capabilities the target lacks" {
         \\export const listProps = {};
         \\export function List() { return <><Item /></>; }
     ;
-    const target = TargetPlugin(void, void){ .name = "plain", .api_version = 1, .capabilities = &.{.fragments}, .compile = Noop.compile };
-    try std.testing.expectError(error.Pjsx, compilePjsx(void, void, a, .{ .source = source }, .{ .filename = "list.ptsx", .target = target, .target_options = {} }));
+    const target = TargetPlugin(void, void){
+        .name = "plain",
+        .api_version = 1,
+        .capabilities = &.{.fragments},
+        .compile = Noop.compile,
+    };
+    try std.testing.expectError(error.Pjsx, compilePjsx(void, void, a, .{
+        .source = source,
+    }, .{
+        .filename = "list.ptsx",
+        .target = target,
+        .target_options = {},
+    }));
     try std.testing.expectEqualStrings("pjsx: target \"plain\" does not support: components", err.message());
 }
 

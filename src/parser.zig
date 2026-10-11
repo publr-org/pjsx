@@ -30,7 +30,12 @@ pub fn parse(allocator: Allocator, source: []const u8, filename: []const u8) Err
 /// Find a template interpolation's closing brace using the TSX grammar, including
 /// regular expressions, comments, nested template literals and JSX children.
 pub fn expressionEnd(allocator: Allocator, source: []const u8, filename: []const u8) Error!u32 {
-    var p = Parser{ .allocator = allocator, .src = source, .lexer = Lexer.init(allocator, source), .filename = filename };
+    var p = Parser{
+        .allocator = allocator,
+        .src = source,
+        .lexer = Lexer.init(allocator, source),
+        .filename = filename,
+    };
     try p.advance();
     try p.expectPunct("{");
     if (!p.isPunct("}")) _ = try p.parseExpression(false);
@@ -47,10 +52,18 @@ pub const Parsed = struct {
 
 /// Parse and also report every TypeScript-only source range, for type stripping.
 pub fn parseWithTypeRanges(allocator: Allocator, source: []const u8, filename: []const u8) Error!Parsed {
-    var p = Parser{ .allocator = allocator, .src = source, .lexer = Lexer.init(allocator, source), .filename = filename };
+    var p = Parser{
+        .allocator = allocator,
+        .src = source,
+        .lexer = Lexer.init(allocator, source),
+        .filename = filename,
+    };
     try p.advance();
     const program = try p.parseProgram();
-    return .{ .program = program, .ts_ranges = try p.ts_ranges.toOwnedSlice(allocator) };
+    return .{
+        .program = program,
+        .ts_ranges = try p.ts_ranges.toOwnedSlice(allocator),
+    };
 }
 
 pub const Parser = struct {
@@ -167,10 +180,20 @@ pub const Parser = struct {
         return result;
     }
 
-    const Snapshot = struct { state: lexer_mod.State, tok: Token, prev_end: u32, ts_len: usize };
+    const Snapshot = struct {
+        state: lexer_mod.State,
+        tok: Token,
+        prev_end: u32,
+        ts_len: usize,
+    };
 
     fn snapshot(self: *Parser) Snapshot {
-        return .{ .state = self.lexer.save(), .tok = self.tok, .prev_end = self.prev_end, .ts_len = self.ts_ranges.items.len };
+        return .{
+            .state = self.lexer.save(),
+            .tok = self.tok,
+            .prev_end = self.prev_end,
+            .ts_len = self.ts_ranges.items.len,
+        };
     }
 
     fn rewind(self: *Parser, snap: Snapshot) void {
@@ -1730,12 +1753,24 @@ pub const Parser = struct {
         const n = try self.node(.Literal, self.tok.start);
         n.raw = self.src[self.tok.start..self.tok.end];
         switch (self.tok.kind) {
-            .string => n.value = .{ .string = self.tok.text },
-            .number => n.value = .{ .number = self.tok.number },
-            .bigint => n.value = .{ .bigint = self.tok.text },
-            .regex => n.value = .{ .regex = self.tok.text },
+            .string => n.value = .{
+                .string = self.tok.text,
+            },
+            .number => n.value = .{
+                .number = self.tok.number,
+            },
+            .bigint => n.value = .{
+                .bigint = self.tok.text,
+            },
+            .regex => n.value = .{
+                .regex = self.tok.text,
+            },
             .identifier => {
-                if (self.isIdent("null")) n.value = .null else if (self.isIdent("true")) n.value = .{ .boolean = true } else if (self.isIdent("false")) n.value = .{ .boolean = false } else return self.unexpected();
+                if (self.isIdent("null")) n.value = .null else if (self.isIdent("true")) n.value = .{
+                    .boolean = true,
+                } else if (self.isIdent("false")) n.value = .{
+                    .boolean = false,
+                } else return self.unexpected();
             },
             else => return self.unexpected(),
         }
@@ -2190,7 +2225,12 @@ pub const Parser = struct {
     /// Parse an element or fragment whose `<` is at `start`; leaves the lexer just past the final `>`.
     fn parseJsxElementAt(self: *Parser, start: u32) Error!*Node {
         self.lexer.resetTo(start + 1);
-        self.tok = .{ .kind = .punct, .text = "<", .start = start, .end = start + 1 };
+        self.tok = .{
+            .kind = .punct,
+            .text = "<",
+            .start = start,
+            .end = start + 1,
+        };
         try self.jsxTag();
         if (self.isPunct(">")) {
             // Fragment
@@ -2326,7 +2366,9 @@ pub const Parser = struct {
             try self.jsxTag();
             if (self.tok.kind == .string) {
                 const literal = try self.node(.Literal, self.tok.start);
-                literal.value = .{ .string = self.tok.text };
+                literal.value = .{
+                    .string = self.tok.text,
+                };
                 literal.raw = self.src[self.tok.start..self.tok.end];
                 literal.end = self.tok.end;
                 attribute.value_node = literal;
@@ -2379,7 +2421,9 @@ pub const Parser = struct {
                 .eof => return self.fail("Unterminated JSX contents", .{}),
                 .jsx_text => {
                     const text = try self.node(.JSXText, self.tok.start);
-                    text.value = .{ .string = self.tok.text };
+                    text.value = .{
+                        .string = self.tok.text,
+                    };
                     text.raw = self.src[self.tok.start..self.tok.end];
                     text.end = self.tok.end;
                     try children.append(self.allocator, text);

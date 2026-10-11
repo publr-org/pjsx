@@ -17,15 +17,24 @@ pub const Value = union(enum) {
     array: []const Value,
     object: []const Field,
 
-    pub const Field = struct { key: []const u8, value: Value };
+    pub const Field = struct {
+        key: []const u8,
+        value: Value,
+    };
 
     pub fn fromLiteral(literal: ast.LiteralValue) Value {
         return switch (literal) {
             .none => .undefined,
             .null => .null,
-            .boolean => |b| .{ .boolean = b },
-            .number => |n| .{ .number = n },
-            .string => |s| .{ .string = s },
+            .boolean => |b| .{
+                .boolean = b,
+            },
+            .number => |n| .{
+                .number = n,
+            },
+            .string => |s| .{
+                .string = s,
+            },
             .regex, .bigint => .undefined,
         };
     }
@@ -34,9 +43,15 @@ pub const Value = union(enum) {
         return switch (self) {
             .undefined => .none,
             .null => .null,
-            .boolean => |b| .{ .boolean = b },
-            .number => |n| .{ .number = n },
-            .string => |s| .{ .string = s },
+            .boolean => |b| .{
+                .boolean = b,
+            },
+            .number => |n| .{
+                .number = n,
+            },
+            .string => |s| .{
+                .string = s,
+            },
             .array, .object => .none,
         };
     }
@@ -155,8 +170,12 @@ pub const Value = union(enum) {
         if (std.meta.activeTag(a) == std.meta.activeTag(b)) return strictEquals(a, b);
         if (a.isNullish() and b.isNullish()) return true;
         if (a.isNullish() or b.isNullish()) return false;
-        if (a == .boolean) return looseEquals(.{ .number = a.toNumber() }, b);
-        if (b == .boolean) return looseEquals(a, .{ .number = b.toNumber() });
+        if (a == .boolean) return looseEquals(.{
+            .number = a.toNumber(),
+        }, b);
+        if (b == .boolean) return looseEquals(a, .{
+            .number = b.toNumber(),
+        });
         if (a == .number and b == .string) return a.number == b.toNumber();
         if (a == .string and b == .number) return a.toNumber() == b.number;
         if (a.isObjectLike() and !b.isObjectLike()) return false;
@@ -169,9 +188,13 @@ pub const Value = union(enum) {
         if (a == .string or b == .string or a.isObjectLike() or b.isObjectLike()) {
             const left = try a.toString(allocator);
             const right = try b.toString(allocator);
-            return .{ .string = try util.concat(allocator, &.{ left, right }) };
+            return .{
+                .string = try util.concat(allocator, &.{ left, right }),
+            };
         }
-        return .{ .number = a.toNumber() + b.toNumber() };
+        return .{
+            .number = a.toNumber() + b.toNumber(),
+        };
     }
 
     /// `a < b` (numeric or string comparison).
@@ -200,12 +223,16 @@ pub const Value = union(enum) {
                 return .undefined;
             },
             .array => |items| {
-                if (util.eql(key, "length")) return .{ .number = @floatFromInt(items.len) };
+                if (util.eql(key, "length")) return .{
+                    .number = @floatFromInt(items.len),
+                };
                 const index = std.fmt.parseInt(usize, key, 10) catch return .undefined;
                 return if (index < items.len) items[index] else .undefined;
             },
             .string => |s| {
-                if (util.eql(key, "length")) return .{ .number = @floatFromInt(s.len) };
+                if (util.eql(key, "length")) return .{
+                    .number = @floatFromInt(s.len),
+                };
                 return .undefined;
             },
             else => return .undefined,
@@ -215,19 +242,41 @@ pub const Value = union(enum) {
 
 test "loose equality follows JavaScript coercion" {
     try std.testing.expect(Value.looseEquals(.null, .undefined));
-    try std.testing.expect(Value.looseEquals(.{ .number = 1 }, .{ .string = "1" }));
-    try std.testing.expect(!Value.looseEquals(.{ .number = 0 }, .null));
-    try std.testing.expect(Value.looseEquals(.{ .boolean = true }, .{ .number = 1 }));
-    try std.testing.expect(!Value.strictEquals(.{ .number = 1 }, .{ .string = "1" }));
+    try std.testing.expect(Value.looseEquals(.{
+        .number = 1,
+    }, .{
+        .string = "1",
+    }));
+    try std.testing.expect(!Value.looseEquals(.{
+        .number = 0,
+    }, .null));
+    try std.testing.expect(Value.looseEquals(.{
+        .boolean = true,
+    }, .{
+        .number = 1,
+    }));
+    try std.testing.expect(!Value.strictEquals(.{
+        .number = 1,
+    }, .{
+        .string = "1",
+    }));
 }
 
 test "add concatenates when either side is a string" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const sum = try Value.add(.{ .number = 1 }, .{ .number = 2 }, a);
+    const sum = try Value.add(.{
+        .number = 1,
+    }, .{
+        .number = 2,
+    }, a);
     try std.testing.expectEqual(@as(f64, 3), sum.number);
-    const text = try Value.add(.{ .string = "h" }, .{ .number = 2 }, a);
+    const text = try Value.add(.{
+        .string = "h",
+    }, .{
+        .number = 2,
+    }, a);
     try std.testing.expectEqualStrings("h2", text.string);
 }
 
@@ -235,7 +284,13 @@ test "toJson matches JSON.stringify for nested values" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const items = [_]Value{ .{ .string = "a" }, .{ .number = 1.5 }, .undefined };
-    const value = Value{ .array = &items };
+    const items = [_]Value{ .{
+        .string = "a",
+    }, .{
+        .number = 1.5,
+    }, .undefined };
+    const value = Value{
+        .array = &items,
+    };
     try std.testing.expectEqualStrings("[\"a\",1.5,null]", try value.toJson(a));
 }

@@ -29,7 +29,9 @@ const transformPjsxToDom = dom.transformPjsxToDom;
 const Arena = struct {
     inner: std.heap.ArenaAllocator,
     fn init() Arena {
-        return .{ .inner = std.heap.ArenaAllocator.init(std.testing.allocator) };
+        return .{
+            .inner = std.heap.ArenaAllocator.init(std.testing.allocator),
+        };
     }
     fn a(self: *Arena) std.mem.Allocator {
         return self.inner.allocator();
@@ -394,7 +396,9 @@ test "hidden on component calls rides the show transport with inverted polarity"
 test "conditional mounting is not exposed as a Publr directive" {
     var arena = Arena.init();
     defer arena.deinit();
-    try std.testing.expectError(error.Pjsx, transformPjsxToDom(arena.a(), "export const item = <div :if={visible}>Item</div>;", .{ .filename = "conditional-mount.ptsx" }));
+    try std.testing.expectError(error.Pjsx, transformPjsxToDom(arena.a(), "export const item = <div :if={visible}>Item</div>;", .{
+        .filename = "conditional-mount.ptsx",
+    }));
     try expectMatch(pjsx.lastError(), "conditional mounting is not a Publr directive; use :show", "");
 }
 
@@ -723,7 +727,9 @@ test "the zig target links only imported PJSX modules used as JSX components" {
 test "compilePjsx exposes the same target-neutral API" {
     var arena = Arena.init();
     defer arena.deinit();
-    const output = compiler.compilePjsx(plugins.ZigTargetOptions, pjsx.targets.zig.ZigOutput, arena.a(), .{ .source = source }, .{
+    const output = compiler.compilePjsx(plugins.ZigTargetOptions, pjsx.targets.zig.ZigOutput, arena.a(), .{
+        .source = source,
+    }, .{
         .filename = "badge.pjsx",
         .target = plugins.zigTarget(),
         .target_options = .{},
@@ -732,7 +738,9 @@ test "compilePjsx exposes the same target-neutral API" {
     try expectContains(output.code, "pub fn render(w: *std.Io.Writer, arena: std.mem.Allocator, props: Props) !void");
 }
 
-const ManifestOptions = struct { prefix: []const u8 };
+const ManifestOptions = struct {
+    prefix: []const u8,
+};
 
 fn manifestCompile(a: std.mem.Allocator, module: *const compiler.ModuleIR, context: compiler.CompileContext, options: ManifestOptions) pjsx.Error![]const u8 {
     std.testing.expectEqualStrings("badge.pjsx", context.filename) catch return error.Pjsx;
@@ -749,10 +757,14 @@ test "a third-party target compiles the public semantic IR without changing PJSX
         .api_version = 1,
         .compile = manifestCompile,
     };
-    const output = compiler.compilePjsx(ManifestOptions, []const u8, arena.a(), .{ .source = source }, .{
+    const output = compiler.compilePjsx(ManifestOptions, []const u8, arena.a(), .{
+        .source = source,
+    }, .{
         .filename = "badge.pjsx",
         .target = target,
-        .target_options = .{ .prefix = "custom" },
+        .target_options = .{
+            .prefix = "custom",
+        },
     }) catch |e| return report(e);
 
     try expectEqualStrings("custom:Badge:label", output);
@@ -800,7 +812,9 @@ test "DOM components render through the runtime root-attribute forwarding bounda
         \\  return <Dynamic as="button" aria-label={label}>{label}</Dynamic>;
         \\}
         \\export const trigger = <Trigger label="Open" data-part="trigger" aria-describedby="hint" />;
-    , .{ .filename = "trigger.ptsx" }) catch |e| return report(e);
+    , .{
+        .filename = "trigger.ptsx",
+    }) catch |e| return report(e);
 
     try expectMatch(output.code, "import \\* as \\$\\$dom from \"publr/dom\"", "");
     try expectMatch(output.code, "component\\(Trigger,", "");
@@ -819,7 +833,9 @@ test "a reactive component child stays a live value instead of a nested thunk" {
         \\function Editor({ state }) {
         \\  return <Readout>{state.label}</Readout>;
         \\}
-    , .{ .filename = "editor.ptsx" }) catch |e| return report(e);
+    , .{
+        .filename = "editor.ptsx",
+    }) catch |e| return report(e);
 
     try expectMatch(output.code, "get children\\(\\) \\{\\s*return state\\.label;\\s*\\}", "");
     try expectNoMatch(output.code, "get children\\(\\) \\{\\s*return \\(\\) => state\\.label", "");
@@ -834,7 +850,9 @@ test "nested JSX-bearing callbacks keep distinct rewritten parameter scopes" {
         \\    Demo: () => <Button hierarchy={hierarchy} intent={intent} />,
         \\  })),
         \\);
-    , .{ .filename = "nested-gallery-callbacks.ptsx" }) catch |e| return report(e);
+    , .{
+        .filename = "nested-gallery-callbacks.ptsx",
+    }) catch |e| return report(e);
 
     try expectMatch(output.code, "flatMap\\(\\(\\$\\$p\\) =>", "");
     try expectMatch(output.code, "INTENTS\\.map\\(\\(\\$\\$p1\\) =>", "");
@@ -857,7 +875,9 @@ test "typed option children lower to descriptor data in the DOM target" {
         \\    </RangeScalePicker>
         \\  );
         \\}
-    , .{ .filename = "range-scale-demo.ptsx" }) catch |e| return report(e);
+    , .{
+        .filename = "range-scale-demo.ptsx",
+    }) catch |e| return report(e);
 
     try expectMatch(output.code, "get children\\(\\) \\{\\s*return options\\.map", "");
     try expectMatch(output.code, "label: \\$\\$p\\.label", "");
@@ -874,7 +894,9 @@ test "typed option children lower to descriptor data in the DOM target" {
         \\    </RangeScalePickerOptions>
         \\  </RangeScalePicker>
         \\);
-    , .{ .filename = "static-range-scale.ptsx" }) catch |e| return report(e);
+    , .{
+        .filename = "static-range-scale.ptsx",
+    }) catch |e| return report(e);
 
     try expectMatch(static_output.code, "get children\\(\\)", "");
     try expectMatch(static_output.code, "label: \"XS\"", "");
@@ -905,7 +927,9 @@ test "compound configuration-shaped children remain real component anatomy" {
         \\}
         \\
     ;
-    const dom_out = transformPjsxToDom(arena.a(), fixture_source, .{ .filename = "box-value-fixture.ptsx" }) catch |e| return report(e);
+    const dom_out = transformPjsxToDom(arena.a(), fixture_source, .{
+        .filename = "box-value-fixture.ptsx",
+    }) catch |e| return report(e);
 
     try expectMatch(dom_out.code, "component\\(BoxValueControlIcon", "");
     try expectMatch(dom_out.code, "component\\(SelectedSidesIcon", "");
@@ -1784,7 +1808,9 @@ test "the Vite adapter transforms both PJSX extensions" {
     inline for (.{ "pjsx", "ptsx" }) |extension| {
         const id = "/project/badge." ++ extension;
         try std.testing.expect(pjsx.isPjsxModule(id));
-        const result = transformPjsxToDom(arena.a(), source, .{ .filename = id }) catch |e| return report(e);
+        const result = transformPjsxToDom(arena.a(), source, .{
+            .filename = id,
+        }) catch |e| return report(e);
         try expectMatch(result.code, "element\\(\\s*\"span\"", "");
     }
 }
