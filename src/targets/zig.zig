@@ -1348,9 +1348,10 @@ const Generator = struct {
         try w.print("pub const root_component: []const u8 = \"{s}\";\n\n", .{root_component_of(gen.module.root)});
         try w.writeAll("pub fn render(w: *std.Io.Writer, arena: std.mem.Allocator, props: Props) !void {\n    @setFloatMode(.strict);\n");
 
-        if (!gen.arena_used) {
-            try w.writeAll("    _ = arena;\n");
-        }
+        // Taken by address, never discarded: whether the body allocates is only known for
+        // sure once it is written (a store's setup may or may not), and `_ = &arena` is
+        // right either way.
+        try w.writeAll("    _ = &arena;\n");
         if (!gen.props_used) {
             try w.writeAll("    _ = props;\n");
         }
