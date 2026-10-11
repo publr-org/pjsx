@@ -464,8 +464,31 @@ pub fn lowerParsedStoreRegistration(allocator: Allocator, parsed_ptr: *const ana
     for (reactive.refs) |ref| try ref_parts.append(a, try fmt(a, "{s}: {s}", .{ try jsonString(a, ref.name), ref.access }));
     const refs = try util.join(a, ref_parts.items, ",\n      ");
 
+    // A store of a family's part reads the family's state from the island around it.
+    var family_reads: StringList = .empty;
+    for (parsed.program.statements) |statement| {
+        if (statement.type != .ImportDeclaration or statement.import_kind == .type) continue;
+        const source = statement.source.?.stringValue() orelse continue;
+        if (!util.hasPjsxExtension(source)) continue;
+        for (statement.specifiers) |specifier| {
+            if (specifier.type != .ImportSpecifier or specifier.import_kind == .type) continue;
+            const imported = specifier.imported orelse continue;
+            if (!util.eql(imported.name, "state")) continue;
+            const local = specifier.local.?.name;
+            if (std.mem.indexOf(u8, state, local) == null and std.mem.indexOf(u8, locals, local) == null) continue;
+            const base = std.fs.path.basename(source);
+            const stem = base[0 .. std.mem.indexOfScalar(u8, base, '.') orelse base.len];
+            try family_reads.append(a, try fmt(a, "const {s} = above({s});", .{ local, try jsonString(a, try util.kebabCase(a, stem)) }));
+        }
+    }
+
     var code: std.ArrayList(u8) = .empty;
-    try code.appendSlice(a, try fmt(a, "Publr.createLocalStore({s}, () => {{\n", .{try jsonString(a, reactive.wire_name)}));
+    if (family_reads.items.len > 0) {
+        try code.appendSlice(a, try fmt(a, "Publr.createLocalStore({s}, ({{ above }}) => {{\n", .{try jsonString(a, reactive.wire_name)}));
+        try code.appendSlice(a, try fmt(a, "  {s}\n", .{try util.join(a, family_reads.items, "\n  ")}));
+    } else {
+        try code.appendSlice(a, try fmt(a, "Publr.createLocalStore({s}, () => {{\n", .{try jsonString(a, reactive.wire_name)}));
+    }
     if (prop_fallbacks.items.len > 0) try code.appendSlice(a, try fmt(a, "  {s}\n", .{try util.join(a, prop_fallbacks.items, "\n  ")}));
     try code.appendSlice(a, try fmt(a, "  {s}\n", .{state}));
     if (locals.len > 0) try code.appendSlice(a, try fmt(a, "  {s}\n", .{try util.replaceAll(a, locals, "\n", "\n  ")}));

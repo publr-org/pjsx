@@ -81,6 +81,7 @@ pub const analyze = struct {
     pub const parsePjsx = analyze_module.parsePjsx;
     pub const parsePjsxWithResolver = analyze_module.parsePjsxWithResolver;
     pub const collectClassTokens = analyze_module.collectClassTokens;
+    pub const collectSourceClassTokens = analyze_module.collectSourceClassTokens;
     pub const collectFiniteStringMaps = analyze_module.collectFiniteStringMaps;
     pub const unwrap = analyze_module.unwrap;
     pub const ParsedModule = analyze_module.ParsedModule;

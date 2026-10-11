@@ -106,21 +106,22 @@ test "IR JSON retains union alternatives literal numbers and variadic tuple cons
     try contains(json, "\"rest\":true");
 }
 
-test "DOM defaults remain native and typed guards work through map scopes" {
+test "DOM props stay live, a computed default is evaluated once, and typed guards work through map scopes" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const output = try pjsx.dom.transformPjsxToDom(arena.allocator(),
         \\type Props = { label?: string; enabled?: boolean; items: { label?: string; enabled?: boolean }[] };
         \\export function Example({ label = nextLabel(), enabled, items }: Props) {
-        \\  return <div>{enabled && <b>On</b>}{items.map(item => <i>{item.label && <b>Label</b>}{item.enabled && <b>On</b>}</i>)}</div>;
+        \\  return <div title={label}>{enabled && <b>On</b>}{items.map(item => <i>{item.label && <b>Label</b>}{item.enabled && <b>On</b>}</i>)}</div>;
         \\}
     , .{
         .filename = "Example.ptsx",
     });
-    try contains(output.code, "label = nextLabel()");
+    try contains(output.code, "let $$p$d_label;");
+    try contains(output.code, "($$p$d_label || ($$p$d_label = [nextLabel()]))[0]");
     try contains(output.code, "enabled === true");
-    try contains(output.code, "$$p().label != null");
-    try contains(output.code, "$$p().enabled === true");
+    try contains(output.code, "$$p1().label != null");
+    try contains(output.code, "$$p1().enabled === true");
     try std.testing.expect(std.mem.indexOf(u8, output.code, "??") == null);
 }
 

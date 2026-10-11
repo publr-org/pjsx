@@ -20,7 +20,49 @@ pub const number_to_string = semantics.number_to_string;
 pub const number_min = semantics.number_min;
 pub const number_max = semantics.number_max;
 pub const number_rem = semantics.number_rem;
+pub const translation = @import("translate.zig");
+pub const translate = translation.translate;
+pub const Translator = translation.Translator;
+pub const Placeholder = translation.Placeholder;
 const class_merge = @import("class_merge");
+const js_values = @import("values.zig");
+
+pub const Expressions = js_values.Expressions;
+pub const Value = js_values.Value;
+pub const Json = js_values.Json;
+pub const evaluate = js_values.evaluate;
+pub const value_truthy = js_values.truthy;
+pub const value_classes = js_values.classes;
+pub const value_into = js_values.into;
+pub const write_json_field = js_values.write_field;
+pub const json_object = js_values.object;
+pub const instance = js_values.instance;
+pub const Family = js_values.Family;
+pub const family_of = js_values.family_of;
+pub const family_state = js_values.family_state;
+pub const value_tag = js_values.tag;
+pub const value_of = js_values.of;
+
+/// A compiled expression's value as text.
+pub fn write_value_text(w: *std.Io.Writer, value: Value) !void {
+    return js_values.write_text(w, value, escape);
+}
+
+/// A compiled expression's value as a store seed's JSON, attribute-escaped.
+pub fn write_seed_from_value(w: *std.Io.Writer, value: Value) !void {
+    switch (value) {
+        .undefined, .null => try w.writeAll("null"),
+        .boolean => |boolean| try w.writeAll(if (boolean) "true" else "false"),
+        .number => |number| try write_number(w, number),
+        .string => |text| try write_seed_string(w, text),
+        .json => |text| try escape(w, text),
+    }
+}
+
+/// A compiled expression's value as a bound attribute; writes its own leading space.
+pub fn write_value_attribute(w: *std.Io.Writer, name: []const u8, value: Value) !void {
+    return js_values.write_attribute(w, name, value, escape);
+}
 
 /// A `node` prop: markup that renders into whatever writer the callee hands
 /// it, when the callee gets there. A caller's children are a `block` — the
@@ -29,17 +71,23 @@ const class_merge = @import("class_merge");
 pub const Node = struct {
     raw: ?[]const u8 = null,
     ctx: *const anyopaque = undefined,
-    render_fn: ?*const fn (*const anyopaque, *std.Io.Writer, std.mem.Allocator, ?*const anyopaque) anyerror!void = null,
+    render_fn: ?*const fn (*const anyopaque, *std.Io.Writer, std.mem.Allocator, ?*const anyopaque, ?*const Family) anyerror!void = null,
 
     pub fn render(node: Node, w: *std.Io.Writer, arena: std.mem.Allocator) anyerror!void {
-        return node.render_with(w, arena, null);
+        return node.render_in(w, arena, null, null);
     }
 
     /// Rendered by a component holding the request (`Publr.request`): a node made ahead of
     /// time for the page (`viewed`) reads it as its own; children read their caller's.
     pub fn render_with(node: Node, w: *std.Io.Writer, arena: std.mem.Allocator, request: ?*const anyopaque) anyerror!void {
+        return node.render_in(w, arena, request, null);
+    }
+
+    /// `render_with`, inside the family roots of whoever renders it: a caller's children
+    /// that are a family's parts read the root's state from them.
+    pub fn render_in(node: Node, w: *std.Io.Writer, arena: std.mem.Allocator, request: ?*const anyopaque, family: ?*const Family) anyerror!void {
         if (node.raw) |html| return w.writeAll(html);
-        return node.render_fn.?(node.ctx, w, arena, request);
+        return node.render_fn.?(node.ctx, w, arena, request, family);
     }
 
     /// The JavaScript truthiness of a node: whether it renders anything. A raw
@@ -64,16 +112,16 @@ pub fn raw(html: []const u8) Node {
 }
 
 /// A caller's children: `capture` points at the generated capture struct (the
-/// props and loop items the block reads), `Body.render(capture, w, arena)`
-/// writes them. The capture must outlive the callee's render call, which the
+/// props and loop items the block reads), `Body.render(capture, w, arena, family)`
+/// writes them, inside the family roots of whoever renders the node. The capture must outlive the callee's render call, which the
 /// generated block scope guarantees.
 pub fn block(capture: anytype, comptime Body: type) Node {
     const Capture = @TypeOf(capture.*);
     const Thunk = struct {
-        fn call(ctx: *const anyopaque, w: *std.Io.Writer, arena: std.mem.Allocator, request: ?*const anyopaque) anyerror!void {
+        fn call(ctx: *const anyopaque, w: *std.Io.Writer, arena: std.mem.Allocator, request: ?*const anyopaque, family: ?*const Family) anyerror!void {
             _ = request;
             const self: *const Capture = @ptrCast(@alignCast(ctx));
-            return Body.render(self.*, w, arena);
+            return Body.render(self.*, w, arena, family);
         }
     };
     return .{
@@ -87,7 +135,8 @@ pub fn block(capture: anytype, comptime Body: type) Node {
 pub fn viewed(capture: anytype, comptime Body: type) Node {
     const Capture = @TypeOf(capture.*);
     const Thunk = struct {
-        fn call(ctx: *const anyopaque, w: *std.Io.Writer, arena: std.mem.Allocator, request: ?*const anyopaque) anyerror!void {
+        fn call(ctx: *const anyopaque, w: *std.Io.Writer, arena: std.mem.Allocator, request: ?*const anyopaque, family: ?*const Family) anyerror!void {
+            _ = family;
             const self: *const Capture = @ptrCast(@alignCast(ctx));
             return Body.render(self.*, w, arena, request);
         }
@@ -109,8 +158,9 @@ pub fn render_to_string(arena: std.mem.Allocator, node: Node) ![]const u8 {
 
 test "a block node streams into the writer it is given and knows when it is empty" {
     const Body = struct {
-        fn render(cap: anytype, w: *std.Io.Writer, arena: std.mem.Allocator) anyerror!void {
+        fn render(cap: anytype, w: *std.Io.Writer, arena: std.mem.Allocator, family: ?*const Family) anyerror!void {
             _ = &arena;
+            _ = family;
             const label = cap.label.*;
             try w.writeAll("<b>");
             try escape(w, label);
@@ -139,6 +189,8 @@ test "a block node streams into the writer it is given and knows when it is empt
 /// item types. Convert at component boundaries, including nested arrays.
 pub fn prop_array(comptime Target: type, arena: std.mem.Allocator, source: anytype) !Target {
     if (Target == @TypeOf(source)) return source;
+    // A list a compiled expression answered, read from its JSON.
+    if (@TypeOf(source) == Value) return js_values.into(Target, arena, source);
     const Item = @typeInfo(Target).pointer.child;
     const result = try arena.alloc(Item, source.len);
     for (source, result) |item, *output| {
@@ -321,7 +373,65 @@ pub fn merge_classes(arena: std.mem.Allocator, parts: []const []const u8) ![]con
 /// Writes a merged class stack, escaped, into an attribute value the caller
 /// has already opened.
 pub fn write_merged(w: *std.Io.Writer, arena: std.mem.Allocator, parts: []const []const u8) !void {
+    // A consumer that writes the merge itself (into the attribute, escaped) takes nothing
+    // from the arena.
+    if (@hasDecl(class_merge, "write_classes")) {
+        return class_merge.write_classes(w, parts);
+    }
+
     try escape(w, try merge_classes(arena, parts));
+}
+
+/// `merge_classes` with the class book the request carries (`book`, the consumer's own
+/// type), when the consumer's merge reads one.
+pub fn merge_classes_in(
+    arena: std.mem.Allocator,
+    book: ?*const anyopaque,
+    parts: []const []const u8,
+) ![]const u8 {
+    if (@hasDecl(class_merge, "merge_classes_in")) {
+        return class_merge.merge_classes_in(arena, book, parts);
+    }
+
+    return merge_classes(arena, parts);
+}
+
+/// `write_merged` with the class book the request carries.
+pub fn write_merged_in(
+    w: *std.Io.Writer,
+    arena: std.mem.Allocator,
+    book: ?*const anyopaque,
+    parts: []const []const u8,
+) !void {
+    if (@hasDecl(class_merge, "write_classes_in")) {
+        return class_merge.write_classes_in(w, book, parts);
+    }
+
+    try write_merged(w, arena, parts);
+}
+
+/// The templates a page has written its prototype for, by id: the render keeps one per page
+/// and hands it to each component through the request (`Program.templates_field`). A
+/// prototype that reads nothing of its instance is written once; a later anchor of the
+/// same template finds it by id.
+pub const Templates = struct {
+    gpa: std.mem.Allocator,
+    written: std.StringHashMapUnmanaged(void) = .empty,
+
+    pub fn deinit(templates: *Templates) void {
+        templates.written.deinit(templates.gpa);
+    }
+};
+
+/// Whether this is the page's first prototype of template `id`, which then counts as
+/// written; with no set, every one is.
+pub fn first_template(templates: ?*anyopaque, id: []const u8) bool {
+    std.debug.assert(id.len > 0);
+
+    const set: *Templates = @ptrCast(@alignCast(templates orelse return true));
+    const slot = set.written.getOrPut(set.gpa, id) catch return true;
+
+    return !slot.found_existing;
 }
 
 pub const Wire = struct {
@@ -372,66 +482,33 @@ pub fn concat(arena: std.mem.Allocator, parts: []const []const u8) []const u8 {
 
 // ---- prop wires --------------------------------------------------------------
 //
-// A component called with a wired prop (`publr_bind_<prop>`) re-emits the wire
-// wherever it uses the prop, composed at render time: a value derived from the
-// prop becomes a match over the caller's wire (`($row.nested -> 'small' ~
-// 'default') { 'small': 'gap-2', 'default': 'gap-3' }`), a nested value spec
-// in parentheses where the wire language takes a ref.
-
-/// One arm of `wire_match`: a key as wire text (`'small'`, `true`, `_`) and
-/// its payload spec; a null payload leaves the arm out (no value).
-pub const WireArm = struct {
-    key: []const u8,
-    value: ?[]const u8,
-};
-
-/// A wire as an operand: a plain `$path` or a quoted literal as is, anything
-/// else parenthesized.
-pub fn wire_group(arena: std.mem.Allocator, wire: []const u8) []const u8 {
-    if (wire.len >= 2 and (wire[0] == '\'' or wire[0] == '"') and wire[wire.len - 1] == wire[0] and
-        std.mem.indexOfScalar(u8, wire[1 .. wire.len - 1], wire[0]) == null) return wire;
-    for (wire) |char| {
-        const plain = std.ascii.isAlphanumeric(char) or char == '$' or char == '_' or char == '.' or char == ':';
-        if (!plain) return concat(arena, &.{ "(", wire, ")" });
-    }
-    return wire;
+/// A compiled expression's argument: the caller's wire when it has one, else the
+/// value as JSON; markup as `true` when there is some, and an absent optional as
+/// `undefined`.
+pub fn slot_argument(arena: std.mem.Allocator, wire: ?[]const u8, value: anytype) []const u8 {
+    if (wire) |present| return present;
+    // Markup is the render's; an expression only tests whether there is some.
+    if (@TypeOf(value) == Node) return if (value.is_empty(arena)) "null" else "true";
+    if (@TypeOf(value) == ?Node) return if (value) |node| slot_argument(arena, null, node) else "undefined";
+    // An optional prop left out is `undefined` to the expression, as in JavaScript.
+    if (@typeInfo(@TypeOf(value)) == .optional) return if (value) |present| slot_argument(arena, null, present) else "undefined";
+    return std.json.Stringify.valueAlloc(arena, value, .{}) catch "null";
 }
 
-/// `(disc) { key: payload, … }`, the arms with no payload left out.
-pub fn wire_match(arena: std.mem.Allocator, disc: []const u8, arms: []const WireArm) []const u8 {
+/// A style attribute's text from `name`/value pairs, the absent and empty values left
+/// out; null when none is left.
+pub fn style_text(arena: std.mem.Allocator, pairs: []const struct {
+    []const u8,
+    ?[]const u8,
+}) !?[]const u8 {
     var out: std.Io.Writer.Allocating = .init(arena);
-    out.writer.print("{s} {{", .{wire_group(arena, disc)}) catch return "";
-    var first = true;
-    for (arms) |arm| {
-        const value = arm.value orelse continue;
-        out.writer.print("{s} {s}: {s}", .{ if (first) "" else ",", arm.key, wire_group(arena, value) }) catch return "";
-        first = false;
+    for (pairs) |pair| {
+        const value = pair[1] orelse continue;
+        if (value.len == 0) continue;
+        if (out.written().len > 0) try out.writer.writeByte(';');
+        try out.writer.print("{s}:{s}", .{ pair[0], value });
     }
-    out.writer.writeAll(" }") catch return "";
-    return out.written();
-}
-
-/// A prop as a wire operand: its caller's wire when it has one, else its value
-/// as a wire literal.
-pub fn wire_value(arena: std.mem.Allocator, wire: ?[]const u8, value: anytype) []const u8 {
-    if (wire) |present| return wire_group(arena, present);
-    return wire_literal(arena, value);
-}
-
-/// A value as wire text: strings quoted, `null` for an absent optional.
-pub fn wire_literal(arena: std.mem.Allocator, value: anytype) []const u8 {
-    const T = @TypeOf(value);
-    switch (@typeInfo(T)) {
-        .optional => return if (value) |inner| wire_literal(arena, inner) else "null",
-        .bool => return if (value) "true" else "false",
-        .float, .comptime_float => return number_to_string(arena, value) catch "",
-        .@"enum" => return wire_literal(arena, @as([]const u8, @tagName(value))),
-        else => {
-            const text: []const u8 = value;
-            const quote: []const u8 = if (std.mem.indexOfScalar(u8, text, '\'') == null) "'" else "\"";
-            return concat(arena, &.{ quote, text, quote });
-        },
-    }
+    return if (out.written().len > 0) out.written() else null;
 }
 
 /// Joins the present, non-empty values with `sep`; null when none is.
@@ -1152,4 +1229,21 @@ test "forwarded bindings merge on an opening tag while the body streams" {
     try forward.writer.writeAll("b\" data-p-bind=\"aria-expanded:$open\">Body</div>");
     try forward.finish();
     try std.testing.expectEqualStrings("<div title=\"a>b\" data-p-bind=\"aria-expanded:$open;data-id:$id\">Body</div>", out.written());
+}
+
+test {
+    std.testing.refAllDecls(js_values);
+}
+
+test "a slot argument is the caller's wire, else the value as JSON" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const Tone = enum { success, neutral };
+    try std.testing.expectEqualStrings("$row.tone", slot_argument(a, "$row.tone", Tone.success));
+    try std.testing.expectEqualStrings("\"success\"", slot_argument(a, null, Tone.success));
+    try std.testing.expectEqualStrings("\"a \\\"b\\\"\"", slot_argument(a, null, @as([]const u8, "a \"b\"")));
+    try std.testing.expectEqualStrings("undefined", slot_argument(a, null, @as(?[]const u8, null)));
+    try std.testing.expectEqualStrings("\"x\"", slot_argument(a, null, @as(?[]const u8, "x")));
+    try std.testing.expectEqualStrings("true", slot_argument(a, null, true));
 }

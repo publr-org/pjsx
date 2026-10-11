@@ -154,7 +154,16 @@ pub const Context = struct {
                 }
             }
         }
+        // The browser's own types (an element, an event, a file) are values a component
+        // receives and hands on; nothing here reads into them.
+        if (!value and isDomType(name)) return c.make(.unknown);
         return err.fail("pjsx: {s}: cannot resolve TypeScript {s} {s}", .{ m.filename, if (value) "value" else "type", name });
+    }
+    fn isDomType(name: []const u8) bool {
+        const exact = [_][]const u8{ "Element", "Node", "Document", "Window", "File", "Blob", "FormData", "DOMRect", "Range", "Selection", "ShadowRoot", "DocumentFragment", "Text", "Comment", "AbortSignal", "URL", "Map", "Set", "Promise", "Date", "RegExp", "Error" };
+        for (exact) |candidate| if (util.eql(name, candidate)) return true;
+        const element = std.mem.startsWith(u8, name, "HTML") or std.mem.startsWith(u8, name, "SVG");
+        return (element and std.mem.endsWith(u8, name, "Element")) or std.mem.endsWith(u8, name, "Event");
     }
     fn valueType(c: *Context, m: *Module, raw: *ast.Node) Error!*Type {
         const node = analyze.unwrap(raw);
@@ -311,6 +320,38 @@ const TypeParser = struct {
         try p.next();
         return true;
     }
+    /// Skips a type parameter list and a parameter list (`<T>(a: T)`), balanced.
+    fn skipBalanced(p: *TypeParser) Error!void {
+        var depth: usize = 0;
+        while (p.t.kind != .eof) {
+            const opens = p.t.is("(") or p.t.is("<") or p.t.is("{") or p.t.is("[");
+            const closes = p.t.is(")") or p.t.is(">") or p.t.is("}") or p.t.is("]");
+            if (opens) depth += 1;
+            if (closes) {
+                depth -= 1;
+                if (depth == 0 and p.t.is(")")) {
+                    try p.next();
+                    return;
+                }
+            }
+            try p.next();
+        }
+        return err.failMsg("pjsx: unterminated method signature");
+    }
+
+    /// Skips a member's type up to the `;`, `,` or `}` that ends it, nesting balanced.
+    fn skipMember(p: *TypeParser) Error!void {
+        var depth: usize = 0;
+        while (p.t.kind != .eof) {
+            if (depth == 0 and (p.t.is(";") or p.t.is(",") or p.t.is("}"))) return;
+            if (p.t.is("(") or p.t.is("<") or p.t.is("{") or p.t.is("[")) depth += 1;
+            if (p.t.is(")") or p.t.is("}") or p.t.is("]")) depth -|= 1;
+            // `>>` closes two type argument lists at once.
+            if (p.t.kind == .punct and p.t.text.len > 0 and std.mem.allEqual(u8, p.t.text, '>')) depth -|= p.t.text.len;
+            try p.next();
+        }
+    }
+
     fn expect(p: *TypeParser, s: []const u8) Error!void {
         if (!try p.eat(s)) return err.fail("pjsx: {s}: expected {s} in type, found {s}", .{ p.m.filename, s, p.t.text });
     }
@@ -393,12 +434,22 @@ const TypeParser = struct {
                     const name = p.t.text;
                     try p.next();
                     const optional = try p.eat("?");
-                    try p.expect(":");
-                    const value = try p.parseUnion();
-                    try object.fields.put(name, .{
-                        .type = value,
-                        .optional = optional,
-                    });
+                    if (p.t.is("(") or p.t.is("<")) {
+                        // A method signature, `name(params): Ret`: a callable field.
+                        try p.skipBalanced();
+                        if (try p.eat(":")) try p.skipMember();
+                        try object.fields.put(name, .{
+                            .type = try c.make(.function),
+                            .optional = optional,
+                        });
+                    } else {
+                        try p.expect(":");
+                        const value = try p.parseUnion();
+                        try object.fields.put(name, .{
+                            .type = value,
+                            .optional = optional,
+                        });
+                    }
                 }
                 if (!try p.eat(";")) _ = try p.eat(",");
             }
@@ -711,6 +762,24 @@ pub fn infer(a: Allocator, program: *ast.Node, source: []const u8, filename: []c
         .schema = schema,
         .contract = contract,
     };
+}
+
+/// The props whose declared types carry JSX (a node, or a union holding one), read from
+/// the props contract alone. Unlike `infer`, a prop whose type has no lowering (an object
+/// of data, a record) is no error: the DOM transform only needs to tell nodes from data.
+pub fn jsxFields(a: Allocator, program: *ast.Node, source: []const u8, filename: []const u8, function: *ast.Node, resolver: ?Resolver) Error!util.StringSet {
+    var c = Context.init(a, resolver);
+    const m = try c.add(filename, source, program);
+    var names = util.StringSet.init(a);
+    if (function.params.len == 0) return names;
+    const param = function.params[0];
+    const pattern = if (param.type == .AssignmentPattern) param.left.? else param;
+    const annotation = pattern.type_annotation orelse return err.fail("pjsx: {s}: component props need a TypeScript annotation", .{filename});
+    const contract = try c.object(try c.textType(m, annotation.slice(source)));
+    for (contract.fields.keys(), contract.fields.values()) |name, field| {
+        if (field.type.kind == .node or includes(field.type, .node)) try names.put(name, {});
+    }
+    return names;
 }
 
 /// Publr JSX guards: booleans test true; optional non-booleans test presence.

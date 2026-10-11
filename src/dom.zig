@@ -58,7 +58,8 @@ test "transformPjsxToDom canonicalizes, transforms and strips types" {
     try std.testing.expect(std.mem.indexOf(u8, out.code, "(event) =>") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.code, "Event") == null);
     try std.testing.expect(std.mem.indexOf(u8, out.code, "show($$dom.element(\"span\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.code, "Badge({") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.code, "Badge($$p)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.code, "() => $$p.label") != null);
 }
 
 test "only explicit component root fragments become p-fragment elements" {

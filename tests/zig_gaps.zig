@@ -21,8 +21,14 @@ fn compile(a: std.mem.Allocator, sources: []const [2][]const u8, which: []const 
     for (sources) |pair| {
         try irs.append(a, try pjsx.compiler.createPjsxModule(a, pair[1], pair[0]));
     }
-    const program = try pjsx.targets.zig.Program.init(a, irs.items);
-    return program.lower(a, which);
+    var program = try pjsx.targets.zig.Program.init(a, irs.items);
+    // As the admin builds them: the server's engine gives live expressions their
+    // first values.
+    program.request = pjsx.targets.zig.requestFields(struct {
+        path: []const u8,
+    });
+    program.expressions_field = "publr_expressions";
+    return program.listing(a, which);
 }
 
 fn rejectsSet(a: std.mem.Allocator, comptime name: []const u8, sources: []const [2][]const u8, comptime message: []const u8) !void {
@@ -38,6 +44,13 @@ fn rejectsSet(a: std.mem.Allocator, comptime name: []const u8, sources: []const 
 
 fn rejects(a: std.mem.Allocator, comptime name: []const u8, source: []const u8, comptime message: []const u8) !void {
     try rejectsSet(a, name, &.{.{ name ++ ".ptsx", source }}, message);
+}
+
+fn expectContains(code: []const u8, expected: []const u8) !void {
+    if (std.mem.indexOf(u8, code, expected) == null) {
+        std.debug.print("\nexpected to find:\n{s}\nin:\n{s}\n", .{ expected, code });
+        return error.TestExpectedContains;
+    }
 }
 
 fn lowers(a: std.mem.Allocator, comptime name: []const u8, source: []const u8) ![]const u8 {
@@ -120,6 +133,27 @@ test "closed gap: an array map may take a primitive-member body" {
 // they are constraints components must satisfy, and are pinned so the contract
 // stays explicit rather than folklore.
 
+test "closed gap: optional chaining and `new` lower, natively or on the engine" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const code = try lowers(a, "Chained",
+        \\import { Publr } from "publr-jsx";
+        \\export const state = Publr.reactive({ app: "" });
+        \\export function Chained({ apps, at }: { apps: Array<{ value: string; selected: boolean }>; at: number }) {
+        \\  state.app = apps.find((app) => app.selected)?.value ?? "";
+        \\  return (
+        \\    <ul data-at={new Date(at).toISOString()}>
+        \\      {apps.map((app) => (
+        \\        <li hidden={state.app === app?.value}>{app?.value}</li>
+        \\      ))}
+        \\    </ul>
+        \\  );
+        \\}
+    );
+    try expectContains(code, "pub fn render");
+}
+
 test "authoring contract: one JSX component per module" {
     // Field originally exported Field, FieldLabel, FieldDescription, FieldError
     // from one module; the parts had to move to sibling files.
@@ -161,16 +195,19 @@ test "closed gap: the publr-dom initials helper lowers to rt.initials" {
     try std.testing.expect(std.mem.indexOf(u8, code, "rt.initials(arena, props.name)") != null);
 }
 
-test "open gap: arbitrary call expressions still fail lowering" {
+test "closed gap: a call the render cannot lower runs in the server's engine" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    try rejects(arena.allocator(), "Avatar",
+    const code = try lowers(arena.allocator(), "Avatar",
         \\
+        \\const abbreviate = (name: string) => name.slice(0, 2);
         \\export const avatarProps = { name: { type: "string" } };
         \\export function Avatar({ name }) {
         \\  return <span>{abbreviate(name)}</span>;
         \\}
-    , "expression kind \"call\" is not lowered here");
+    );
+    try expectContains(code, "rt.write_value_text(w, (try rt.evaluate(");
+    try expectContains(code, "// slot e_Avatar_1: ({ name }) => abbreviate(name)");
 }
 
 test "closed gap: the publr-dom gravatarUrl helper lowers to rt.gravatar_url" {
@@ -274,21 +311,24 @@ test "closed gap: loop locals reach component props, children and guards inside 
         std.debug.print("\npjsx diagnostic: {s}\n", .{pjsx.lastError()});
         return e;
     };
-    // The prototype: row fields are wires; a compound guard is a branch per
-    // guard, since no one wire tests both.
-    try expectMatch(code, "\\.publr_bind_tone = \"\\$row\\.tone\"", "");
-    try expectMatch(code, "\\.publr_bind_size = \"\\$row\\.nested -> 'small' ~ 'default'\"", "");
-    try expectMatch(code, "data-p-if=\\\\\"not \\$row\\.current\\\\\"><span class=\\\\\"contents\\\\\"><template data-p-template=\\\\\"Switcher-2\\\\\" data-p-if=\\\\\"\\$row\\.running\\\\\">", "");
+    // The prototype: row fields are wires, a computed prop or a compound guard
+    // is a compiled expression over the row.
+    try expectContains(code, ".publr_bind_tone = \"$row.tone\"");
+    try expectContains(code, ".publr_bind_size = \"$e_Switcher_1\"");
+    try expectContains(code, "// slot e_Switcher_1: ({ row }) => (row.nested ? \"small\" : \"default\")");
+    try expectContains(code, "data-p-if=\\\"$e_Switcher_2\\\">");
+    try expectContains(code, "// slot e_Switcher_2: ({ row }) => (!row.current && row.running)");
     // The server-rendered rows: the loop local reaches props, guards and the
     // children blocks, and enum props take their values from the row.
     try expectMatch(code, "\\.title = row\\.title,", "");
     try expectMatch(code, "\\.tone = \\(switch \\(row\\.tone\\) \\{ \\.@\"success\" => \\.@\"success\", \\.@\"accent\" => \\.@\"accent\", \\.@\"warning\" => \\.@\"warning\", \\}\\)", "");
-    try expectMatch(code, "\\.size = \\(if \\(row\\.nested\\) \\.@\"small\" else \\.@\"default\"\\)", "");
-    try expectMatch(code, "if \\(!row\\.current\\) \\{", "");
-    try expectMatch(code, "if \\(std\\.mem\\.eql\\(u8, row\\.kind, \"draft\"\\)\\) \\{", "");
-    try expectMatch(code, "\\.intent = \\(if \\(row\\.confirm\\) \\.@\"destructive\" else \\.@\"default\"\\)", "");
-    try expectMatch(code, "const children_\\d+ = \\.\\{ \\.props = &props, \\.row = &row, \\};", "");
-    try expectMatch(code, "const row = cap\\.row\\.\\*;\n\\s*_ = &row;\n\\s*try w\\.writeAll\\(\"<template data-p-template=\\\\\"Switcher-5\\\\\" data-p-if></template>\"\\);\n\\s*if \\(row\\.confirm\\)", "");
+    // A row's computed props and guards are the engine's, with the row as their scope.
+    try expectContains(code, "arena, \"Switcher\", \"e_Switcher_1\", (try publr_state.text(arena)), .{ .row = row, })");
+    try expectContains(code, "if (rt.value_truthy((try rt.evaluate(");
+    try expectContains(code, "arena, \"Switcher\", \"e_Switcher_2\", (try publr_state.text(arena)), .{ .row = row, })");
+    try expectContains(code, "arena, \"Switcher\", \"e_Switcher_4\", (try publr_state.text(arena)), .{ .row = row, })");
+    try expectMatch(code, "const children_\\d+ = \\.\\{ \\.props = &props, \\.publr_family = publr_family, \\.publr_state = publr_state, \\.row = &row, \\};", "");
+    try expectMatch(code, "const row = cap\\.row\\.\\*;\n\\s*_ = &row;\n\\s*try w\\.writeAll\\(\"<template data-p-template=\\\\\"Switcher-3\\\\\" data-p-if></template>\"\\);\n\\s*if \\(row\\.confirm\\)", "");
 }
 
 test "closed gap: a string-keyed finite map lookup is an optional string" {
@@ -443,29 +483,73 @@ test "closed gap: a component re-emits the wires of its wired props" {
         std.debug.print("\npjsx diagnostic: {s}\n", .{pjsx.lastError()});
         return e;
     };
-    // Text: the element carries the wire of its sole child.
-    try expectMatch(card, "try rt\\.write_attr_cond\\(w, \"data-p-text\", \\(if \\(props\\.publr_bind_title != null\\) @as\\(\\?\\[\\]const u8, rt\\.wire_value\\(arena, props\\.publr_bind_title, props\\.title\\)\\)", "");
-    // Class layers: a group per layer, the arms indexed class lists.
-    try expectMatch(card, "\"data-p-class\", rt\\.join_optionals\\(arena, &\\.\\{ \\(if \\(props\\.publr_bind_size != null\\)", "");
-    try expectMatch(card, "\" \\{ '0': gap-3, '1': gap-2 \\}\"", "");
-    try expectMatch(card, "\" \\{ '0': bg-success, '1': bg-primary, '2': bg-card \\}\"", "");
-    // Attributes: an arm without a value leaves the attribute out.
-    try expectMatch(card, "rt\\.concat\\(arena, &\\.\\{ \"aria-current:\", publr_wire \\}\\)", "");
-    try expectMatch(card, "\\.\\{ \\.key = \"true\", \\.value = @as\\(\\?\\[\\]const u8, \"'true'\"\\) \\}, \\.\\{ \\.key = \"false\", \\.value = @as\\(\\?\\[\\]const u8, null\\) \\}", "");
-    // Nested components: derived wires pass on as the callee's prop wires.
-    try expectMatch(card, "\\.publr_bind_name = \\(if \\(props\\.publr_bind_icon != null\\)", "");
-    try expectMatch(card, "\\.publr_bind_size = \\(if \\(props\\.publr_bind_size != null\\)", "");
-    // Guarded markup: a `data-p-if` template over the wire, with its
+    // Text: the element carries the wire of its sole child, as the caller handed it.
+    try expectContains(card, "try rt.write_attr_cond(w, \"data-p-text\", props.publr_bind_title);");
+    // Class layers: a compiled expression per layer, its props as arguments,
+    // bound only when a caller wired one of them.
+    try expectContains(card, "\"data-p-class\", rt.join_optionals(arena, &.{ (if (props.publr_bind_size != null) @as(?[]const u8, rt.concat(arena, &.{ \"$e_Card_2(\", \"size: \", rt.slot_argument(arena, props.publr_bind_size, props.size), \")\" }))");
+    try expectContains(card, "// slot e_Card_2: ({ size }) => { const small = (size === \"small\"); return (small ? \"gap-2\" : \"gap-3\"); }");
+    try expectContains(card, "// slot e_Card_3: ({ current, tone }) => (current ? TONES[tone] : \"bg-card\")");
+    // Attributes: the same, joined into the element's bindings.
+    try expectContains(card, "rt.concat(arena, &.{ \"aria-current:\", publr_wire })");
+    try expectContains(card, "// slot e_Card_1: ({ current }) => (current ? \"true\" : undefined)");
+    // Nested components: a prop passes on as it is, a derived value as a slot.
+    try expectContains(card, ".publr_bind_name = props.publr_bind_icon,");
+    try expectContains(card, ".publr_bind_size = (if (props.publr_bind_size != null) @as(?[]const u8, rt.concat(arena, &.{ \"$e_Card_7(\"");
+    // Guarded markup: a `data-p-if` template over the slot, with its
     // server-rendered arm, and the plain branch when unwired.
-    try expectMatch(card, "rt\\.concat\\(arena, &\\.\\{ rt\\.wire_group\\(arena, rt\\.wire_value\\(arena, props\\.publr_bind_description, props\\.description\\)\\), \" != ''\" \\}\\)", "");
+    try expectContains(card, "rt.concat(arena, &.{ \"$e_Card_9(\", \"description: \", rt.slot_argument(arena, props.publr_bind_description, props.description), \")\" })");
+    try expectContains(card, "// slot e_Card_9: ({ description }) => (description !== \"\")");
     try expectMatch(card, "<template data-p-template=\\\\\"Card-0\\\\\" data-p-if=\\\\\"", "");
-    try expectMatch(card, "rt\\.RootAttributeWriter\\.init\\(w, \"data-p-if-row\", null\\)", "");
+    try expectContains(card, "rt.RootAttributeWriter.init(w, \"data-p-if-row\", null)");
 
     const glyph = try compile(arena.allocator(), &sources, "Glyph");
-    // A template literal over a small enum prop is a match per value; over
-    // a string it concatenates in the wire.
-    try expectMatch(glyph, "\\.\\{ \\.key = \"'a'\", \\.value = @as\\(\\?\\[\\]const u8, \"'#icon-a'\"\\) \\}", "");
-    try expectMatch(glyph, "rt\\.concat\\(arena, &\\.\\{ \"'Icon '\", \" \\+ \", rt\\.wire_group\\(arena, rt\\.wire_value\\(arena, props\\.publr_bind_label, props\\.label\\)\\), \\}\\)", "");
+    // A template literal over props is a compiled expression like any other.
+    try expectContains(glyph, "// slot e_Glyph_");
+    try expectContains(glyph, "=> `#icon-${name}`");
+    try expectContains(glyph, "=> `Icon ${label}`");
+}
+
+test "closed gap: a template's prototype leaves out classes drawn from props the row fills" {
+    // publr's AI workspace: each paragraph's Text variant is chosen per row. The
+    // prototype rendered it from a placeholder (the first variant, a large bold
+    // heading), and the browser added the row's classes beside it.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const sources = [_][2][]const u8{
+        .{
+            "Badge.ptsx",
+            \\export type BadgeProps = { tone: "loud" | "quiet"; children: JSX.Element };
+            \\const TONES = { loud: "font-bold", quiet: "font-normal" } as const;
+            \\export function Badge({ tone, children }: BadgeProps) {
+            \\  return <span class={["inline", TONES[tone]]}>{children}</span>;
+            \\}
+        },
+        .{
+            "List.ptsx",
+            \\import { Publr } from "publr-jsx";
+            \\import { Badge } from "./Badge.ptsx";
+            \\type Row = { name: string; loud: boolean };
+            \\export const state = Publr.reactive({ rows: [] as Row[] });
+            \\export function List() {
+            \\  return <ul>{state.rows.map((row) => (
+            \\    <li key={row.name}><Badge tone={row.loud ? "loud" : "quiet"}>{row.name}</Badge></li>
+            \\  ))}</ul>;
+            \\}
+        },
+    };
+    const list = compile(arena.allocator(), &sources, "List") catch |e| {
+        std.debug.print("\npjsx diagnostic: {s}\n", .{pjsx.lastError()});
+        return e;
+    };
+    // The prototype says so; the rows the server renders pass on what they were told.
+    try expectContains(list, ".publr_prototype = true,");
+    try expectContains(list, ".publr_prototype = props.publr_prototype,");
+
+    const badge = try compile(arena.allocator(), &sources, "Badge");
+    // The row-filled layer is empty in a prototype; the browser draws it.
+    try expectContains(badge, "(if (props.publr_prototype and ((if (props.publr_bind_tone != null)");
+    try expectContains(badge, "@as([]const u8, \"\") else (switch (props.tone)");
 }
 
 const menu_stub =
@@ -539,14 +623,17 @@ test "closed gap: loop items and own state reach family components nested in fam
         std.debug.print("\npjsx diagnostic: {s}\n", .{pjsx.lastError()});
         return e;
     };
-    // The prototype: a template literal over the row concatenates in the wire.
-    try expectMatch(code, "\\.publr_bind_label = \"'More for ' \\+ \\$row\\.title\"", "");
-    // The server-rendered rows: the label formats the row's title.
-    try expectMatch(code, "\\.label = try std\\.fmt\\.allocPrint\\(arena, \"More for \\{s\\}\", \\.\\{ row\\.title, \\}\\)", "");
+    // The prototype: a template literal over the row is a compiled expression.
+    try expectContains(code, ".publr_bind_label = \"$e_Switcher_2\"");
+    try expectContains(code, "// slot e_Switcher_2: ({ row }) => `More for ${row.title}`");
+    // The server-rendered rows: the label is the engine's, over the row.
+    try expectContains(code, ".label = (try rt.value_into(?[]const u8, arena, (try rt.evaluate(");
+    try expectContains(code, "\"e_Switcher_2\", (try publr_state.text(arena)), .{ .row = row, })");
     try expectMatch(code, "data-p-if=\\\\\"\\$row\\.can_start\\\\\"", "");
     // Own state inside the family's children: a list, a guard and a prop wire.
     try expectMatch(code, "data-p-for=\\\\\"base of \\$bases\\\\\"", "");
-    try expectMatch(code, "data-p-if=\\\\\"\\$kind == 'page'\\\\\"", "");
+    try expectContains(code, "data-p-if=\\\"$e_Switcher_1\\\"");
+    try expectContains(code, "// slot e_Switcher_1: () => (state.kind === \"page\")");
     try expectMatch(code, "\\.publr_bind_disabled = \"\\$busy\"", "");
 }
 
@@ -608,15 +695,16 @@ test "closed gap: a wired optional prop is present, and a wired class list cross
         return e;
     };
     // The prototype's wired optional takes a present placeholder.
-    try expectMatch(nav, "NavLink\\.render\\(w, arena, \\.\\{ \\.href = \"\", \\.publr_bind_href = \"'#' \\+ \\$row\\.name\", \\.publr_bind_busy = \"\\$row\\.busy\"", "");
+    try expectContains(nav, "NavLink.render(w, arena, .{ .href = \"\", .publr_bind_href = \"$e_Nav_1\", .publr_bind_busy = \"$row.busy\"");
+    try expectContains(nav, "// slot e_Nav_1: ({ row }) => `#${row.name}`");
 
     const link = try compile(arena.allocator(), &sources, "NavLink");
-    try expectMatch(link, "\\.publr_bind_classes = \\(if \\(props\\.publr_bind_busy != null\\)", "");
-    try expectMatch(link, "\\.\\{ \\.key = \"true\", \\.value = @as\\(\\?\\[\\]const u8, \"'ml-auto animate-spin'\"\\) \\}, \\.\\{ \\.key = \"false\", \\.value = @as\\(\\?\\[\\]const u8, \"'hidden'\"\\) \\}", "");
+    try expectContains(link, ".publr_bind_classes = (if (props.publr_bind_busy != null)");
+    try expectContains(link, "=> (busy ? \"ml-auto animate-spin\" : \"hidden\")");
 
-    // The nested component's class list: the caller's value spec as a group.
+    // The nested component's class list: the caller's wire as a group.
     const spinner = try compile(arena.allocator(), &sources, "Spinner");
-    try expectMatch(spinner, "\"data-p-class\", rt\\.join_optionals\\(arena, &\\.\\{ \\(if \\(\\(if \\(props\\.publr_bind_classes != null\\) @as\\(\\?\\[\\]const u8, rt\\.wire_value\\(arena, props\\.publr_bind_classes, props\\.classes\\)\\) else @as\\(\\?\\[\\]const u8, null\\)\\)\\) \\|publr_classes\\| @as\\(\\?\\[\\]const u8, rt\\.concat\\(arena, &\\.\\{ \"\\(\", publr_classes, \"\\)\" \\}\\)\\)", "");
+    try expectContains(spinner, "\"data-p-class\", rt.join_optionals(arena, &.{ (if (props.publr_bind_classes) |publr_classes| @as(?[]const u8, rt.concat(arena, &.{ \"(\", publr_classes, \")\" }))");
 }
 
 test "closed gap: a row of a reactive list reads the module's other state" {
@@ -634,7 +722,8 @@ test "closed gap: a row of a reactive list reads the module's other state" {
         \\  </ul>;
         \\}
     );
-    try expectMatch(code, "data-chosen:\\$chosen == 1 -&gt; 'yes' ~ 'no'", "");
+    try expectContains(code, "data-p-bind=\\\"data-chosen:$e_Picks_1\\\"");
+    try expectContains(code, "// slot e_Picks_1: () => ((state.chosen === 1) ? \"yes\" : \"no\")");
 }
 
 test "closed gap: a row whose body is a guard lands in a wrapper that holds the row" {
@@ -652,7 +741,10 @@ test "closed gap: a row whose body is a guard lands in a wrapper that holds the 
         \\  </div>;
         \\}
     );
-    try expectMatch(code, "data-p-for=\\\\\"item of \\$actions\\\\\"><span class=\\\\\"contents\\\\\"><template data-p-template=\\\\\"[A-Za-z]+-1\\\\\" data-p-if=\\\\\"\\$item\\.primary\\\\\">", "");
+    // The wrapper's class goes through the merge like every other.
+    try expectMatch(code, "data-p-for=\\\\\"item of \\$actions\\\\\"><span class=\\\\\"", "");
+    try expectMatch(code, "&.\\{ \"contents\", \\}", "");
+    try expectMatch(code, "\\\\\"><template data-p-template=\\\\\"[A-Za-z]+-1\\\\\" data-p-if=\\\\\"\\$item\\.primary\\\\\">", "");
 }
 
 test "closed gap: a wire compares one state value with another" {
@@ -670,7 +762,8 @@ test "closed gap: a wire compares one state value with another" {
         \\  </ul>;
         \\}
     );
-    try expectMatch(code, "data-chosen:\\$chosen == \\$row.index -&gt; 'yes' ~ 'no'", "");
+    try expectContains(code, "data-p-bind=\\\"data-chosen:$e_PicksBoth_1\\\"");
+    try expectContains(code, "// slot e_PicksBoth_1: ({ row }) => ((state.chosen === row.index) ? \"yes\" : \"no\")");
 }
 
 test "closed gap: null against an optional prop" {
@@ -746,10 +839,14 @@ test "closed gap: every component call hands the request down" {
 test "compiler gap: Publr.request without a declared request is rejected" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    try rejects(arena.allocator(), "Rail",
+    const a = arena.allocator();
+    const module = try pjsx.compiler.createPjsxModule(a,
         \\import { Publr } from "publr-jsx";
         \\export function Rail() { return <nav>{Publr.request.session.email}</nav>; }
-    , "declares no request");
+    , "Rail.ptsx");
+    const program = try pjsx.targets.zig.Program.init(a, &.{module});
+    try std.testing.expectError(error.Pjsx, program.lower(a, "Rail"));
+    try expectMatch(pjsx.lastError(), "declares no request", "");
 }
 
 test "closed gap: a flag guards a node prop" {

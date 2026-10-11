@@ -77,7 +77,8 @@ fn domCode(a: std.mem.Allocator, src: []const u8, filename: []const u8) ![]const
 /// One module through the `zig` SSR target, the compile set being just itself.
 fn zigCode(a: std.mem.Allocator, src: []const u8, filename: []const u8) ![]const u8 {
     const module = createPjsxModule(a, src, filename) catch |e| return report(e);
-    return (lowerPjsxToZig(a, module, &.{}) catch |e| return report(e)).code;
+    const program = pjsx.targets.zig.Program.init(a, &.{module}) catch |e| return report(e);
+    return program.listing(a, module.component.name) catch |e| return report(e);
 }
 
 /// Lower `which` against a whole compile set, the way a build does — imports
@@ -88,7 +89,7 @@ fn zigCodeSet(a: std.mem.Allocator, sources: []const [2][]const u8, which: []con
         try irs.append(a, createPjsxModule(a, pair[1], pair[0]) catch |e| return report(e));
     }
     const program = pjsx.targets.zig.Program.init(a, irs.items) catch |e| return report(e);
-    return program.lower(a, which) catch |e| return report(e);
+    return program.listing(a, which) catch |e| return report(e);
 }
 
 /// Like `zigCode`, but without the diagnostic dump — for expected failures.
@@ -345,6 +346,25 @@ test "a family part lowers imported state and actions onto the wire transport" {
     try std.testing.expect((try lowerPjsxStoreRegistration(arena.a(), family_part_source, "DisclosureButton.ptsx")) == null);
 }
 
+test "a family root that reads another family's state finds that family's island around it" {
+    var arena = Arena.init();
+    defer arena.deinit();
+    const counter_source =
+        \\import { Publr } from "publr-jsx";
+        \\import { state as disclosure } from "./Disclosure.ptsx";
+        \\export const state = Publr.reactive({ count: 0 });
+        \\Publr.effect(() => {
+        \\  state.count = disclosure.open ? 1 : 0;
+        \\});
+        \\export function Counter() {
+        \\  return <span>{state.count}</span>;
+        \\}
+    ;
+    const registration = (lowerPjsxStoreRegistration(arena.a(), counter_source, "Counter.ptsx") catch |e| return report(e)).?;
+    try expectMatch(registration.code, "Publr\\.createLocalStore\\(\"counter\", \\(\\{ above \\}\\) => \\{", "");
+    try expectMatch(registration.code, "const disclosure = above\\(\"disclosure\"\\);", "");
+}
+
 test "DOM module objects remain ordinary shared exports" {
     var arena = Arena.init();
     defer arena.deinit();
@@ -386,11 +406,11 @@ test "hidden on component calls rides the show transport with inverted polarity"
     }, "IconPair");
 
     try expectMatch(dom_out, "show\\(\\$\\$dom\\.component\\(Icon,", "");
-    try expectMatch(dom_out, "!!active", "");
-    try expectMatch(dom_out, "!\\(active \\|\\| muted\\)", "");
-    try expectContains(zig_out, "try Icon.render(w, arena, .{ .publr_show = !!props.active, .publr_request = props.publr_request, });");
-    try expectContains(zig_out, "try Icon.render(w, arena, .{ .publr_show = !props.active, .publr_request = props.publr_request, });");
-    try expectContains(zig_out, "try Icon.render(w, arena, .{ .publr_show = !(props.active or props.muted), .publr_request = props.publr_request, });");
+    try expectContains(dom_out, "!!($$p.active === undefined ? false : $$p.active)");
+    try expectContains(dom_out, "!(($$p.active === undefined ? false : $$p.active) || ($$p.muted === undefined ? false : $$p.muted))");
+    try expectContains(zig_out, "try Icon.render(w, arena, .{ .publr_show = !!props.active, .publr_request = props.publr_request, .publr_prototype = props.publr_prototype, .publr_family = props.publr_family, });");
+    try expectContains(zig_out, "try Icon.render(w, arena, .{ .publr_show = !props.active, .publr_request = props.publr_request, .publr_prototype = props.publr_prototype, .publr_family = props.publr_family, });");
+    try expectContains(zig_out, "try Icon.render(w, arena, .{ .publr_show = !(props.active or props.muted), .publr_request = props.publr_request, .publr_prototype = props.publr_prototype, .publr_family = props.publr_family, });");
 }
 
 test "conditional mounting is not exposed as a Publr directive" {
@@ -459,7 +479,7 @@ test "portal and anchored-position directives lower through DOM and Zig" {
 
     try expectMatch(dom_out, "\"data-p-portal\", true", "");
     try expectMatch(dom_out, "\"data-p-anchor\", true", "");
-    try expectContains(dom_out, "\"data-p-position\", () => align");
+    try expectContains(dom_out, "\"data-p-position\", () => $$domProps0.align === undefined ? \"left\" : $$domProps0.align");
 
     // The zig chain's spellings are the bare attributes `portal`/`anchor` and
     // a plain `position={…}` (renamed to data-p-position at emission).
@@ -980,8 +1000,8 @@ test "compound anatomy sharing the parent prefix remains rendered children" {
     }, "Demo");
     const dom_out = try domCode(arena.a(), demo_source, "Demo.ptsx");
 
-    try expectContains(zig_out, "try UnitControlInput.render(w, arena, .{ .value = @as(f64, 0), .publr_request = props.publr_request, });");
-    try expectContains(zig_out, "try UnitControlUnit.render(w, arena, .{ .value = \"px\", .publr_request = props.publr_request, });");
+    try expectContains(zig_out, "try UnitControlInput.render(w, arena, .{ .value = @as(f64, 0), .publr_request = props.publr_request, .publr_prototype = props.publr_prototype, .publr_family = publr_family, });");
+    try expectContains(zig_out, "try UnitControlUnit.render(w, arena, .{ .value = \"px\", .publr_request = props.publr_request, .publr_prototype = props.publr_prototype, .publr_family = publr_family, });");
     try expectNotContains(zig_out, "inputValue");
     try expectNotContains(zig_out, "unitValue");
     try expectMatch(dom_out, "component\\(UnitControlInput, \\{ value: 0 \\}\\)", "");
@@ -1022,7 +1042,7 @@ test "nullish coalescing preserves JavaScript semantics and lowers to Zig option
     try expectContains(zig_out, "children: ?rt.Node = null,");
     try expectContains(zig_out, "try rt.escape(w, (props.title orelse \"Untitled\"));");
     try expectContains(zig_out, "if ((props.hidden orelse false)) try w.writeAll(\" hidden\");");
-    try expectContains(zig_out, "try (props.children orelse props.fallback).render_with(w, arena, props.publr_request);");
+    try expectContains(zig_out, "try (props.children orelse props.fallback).render_in(w, arena, props.publr_request, props.publr_family);");
 }
 
 test "optional node children can fall back to declarative JSX" {
@@ -1056,7 +1076,7 @@ test "optional node children can fall back to declarative JSX" {
 
     try expectContains(zig_out, "if (props.children) |present_1| {");
     try expectContains(zig_out, "try rt.escape(w, props.label);");
-    try expectContains(zig_out, "try Text.render(w, arena, .{ .variant = .@\"body-md\", .publr_request = props.publr_request, .children = rt.block(&children_2, Children_2) });");
+    try expectContains(zig_out, "try Text.render(w, arena, .{ .variant = .@\"body-md\", .publr_request = props.publr_request, .publr_prototype = props.publr_prototype, .publr_family = props.publr_family, .children = rt.block(&children_2, Children_2) });");
 }
 
 test "conditionals with undefined lower to optional Zig attributes" {
@@ -1435,7 +1455,7 @@ test "an optional string guard is false when empty, as in JavaScript" {
     try expectNotContains(zig_out, "if ((props.description != null))");
 }
 
-test "a conditional over own state whose branch also reads own state renders its initial" {
+test "a conditional over own state is a compiled expression, with no first value without an engine" {
     var arena = Arena.init();
     defer arena.deinit();
     const sized_source =
@@ -1454,8 +1474,9 @@ test "a conditional over own state whose branch also reads own state renders its
     ;
     const zig_out = try zigCode(arena.a(), sized_source, "sized.ptsx");
 
-    try expectContains(zig_out, "if ((props.initial > @as(f64, 0)))");
-    try expectContains(zig_out, "style:$height &gt; 0 -&gt; ('height:' + $height + 'px') ~ ''");
+    try std.testing.expect(std.mem.indexOf(u8, zig_out, "style=") == null);
+    try expectContains(zig_out, " data-p-bind=\\\"style:$e_Sized_1\\\"");
+    try expectContains(zig_out, "// slot e_Sized_1: () => ((state.height > 0) ? `height:${state.height}px` : \"\")");
 }
 
 test "component calls pass typed booleans and forward renamed action props by name" {
@@ -1596,9 +1617,19 @@ test "Slot accepts explicit Publr binding directives" {
     try expectMatch(output, "aria-expanded:\\$open", "");
 }
 
-test "reactive style maps are rejected loudly" {
+test "style maps from props are written by the render; over state they are bound" {
     var arena = Arena.init();
     defer arena.deinit();
+    const swatch_source =
+        \\
+        \\export function Swatch({ color, indent }: { color: string; indent?: number }) {
+        \\  return <span style={{ backgroundColor: color, paddingLeft: indent, display: "block" }} />;
+        \\}
+        \\
+    ;
+    const swatch = try zigCode(arena.a(), swatch_source, "swatch.ptsx");
+    try expectContains(swatch, "try rt.write_attr_cond(w, \"style\", try rt.style_text(arena, &.{ .{ \"background-color\", @as(?[]const u8, props.color) }, .{ \"padding-left\", (if (props.indent) |number| @as(?[]const u8, try rt.number_to_string(arena, number)) else null) }, .{ \"display\", @as(?[]const u8, \"block\") }, }));");
+
     const text_demo_source =
         \\
         \\import { Publr } from "publr/dom";
@@ -1615,8 +1646,9 @@ test "reactive style maps are rejected loudly" {
         \\}
         \\
     ;
-    try std.testing.expectError(error.Pjsx, zigError(arena.a(), text_demo_source, "text-demo.ptsx"));
-    try expectEqualStrings("TextDemo: style map value \"maxWidth\" is not a literal string; reactive styles are not lowered", pjsx.lastError());
+    const text_demo = try zigCode(arena.a(), text_demo_source, "text-demo.ptsx");
+    try expectContains(text_demo, "data-p-bind=\\\"style:$e_TextDemo_1\\\"");
+    try expectContains(text_demo, "// slot e_TextDemo_1: () => styleText(({ \"maxWidth\": () => state.width }))");
 }
 
 test "reactive scalar props carry their bind wire through component boundaries" {

@@ -78,6 +78,8 @@ pub const ExpressionIR = union(enum) {
     member: struct {
         object: *const ExpressionIR,
         property: MemberProperty,
+        /// `a?.b`: inside a `chain`, a nullish object ends the chain as `undefined`.
+        optional: bool = false,
     },
     unary: struct {
         operator: []const u8,
@@ -106,6 +108,17 @@ pub const ExpressionIR = union(enum) {
         fields: []const ObjectFieldIR,
     },
     call: struct {
+        callee: *const ExpressionIR,
+        arguments: []const *const ExpressionIR,
+        /// `f?.()`: inside a `chain`, a nullish callee ends the chain as `undefined`.
+        optional: bool = false,
+    },
+    /// `a?.b.c`: the extent an optional member or call short-circuits.
+    chain: struct {
+        expression: *const ExpressionIR,
+    },
+    /// `new Date(x)`.
+    construct: struct {
         callee: *const ExpressionIR,
         arguments: []const *const ExpressionIR,
     },
@@ -194,6 +207,12 @@ pub const NodeIR = union(enum) {
     },
 };
 
+/// A module-level function or constant as type-stripped JavaScript.
+pub const DeclarationIR = struct {
+    name: []const u8,
+    code: []const u8,
+};
+
 pub const ImportNameIR = struct {
     imported: []const u8,
     local: []const u8,
@@ -259,6 +278,12 @@ pub const ComponentIR = struct {
     reactive: ?ReactiveIR,
     family: ?FamilyIR,
     store_registration: ?StoreRegistrationIR = null,
+    /// A plain module's helpers, for the islands that import them: its top-level functions
+    /// and constants other than components, type-stripped JS. Null for a stateful module.
+    shared_code: ?[]const u8 = null,
+    /// The module's top-level helpers one by one (its state aside), so a compiled
+    /// expression's block, or its server program, carries only those it reads.
+    declarations: []const DeclarationIR = &.{},
     locals: []const LocalIR = &.{},
     /// Props captured by parameter destructuring, as distinct from live props.x.
     snapshots: []const []const u8 = &.{},
@@ -406,6 +431,7 @@ fn expressionIR(allocator: Allocator, node: *Node, parsed: *const analyze.Parsed
                 .member = .{
                     .object = try expressionIR(allocator, object, parsed),
                     .property = property,
+                    .optional = value.optional,
                 },
             });
         },
@@ -475,16 +501,30 @@ fn expressionIR(allocator: Allocator, node: *Node, parsed: *const analyze.Parsed
                 },
             });
         },
-        .CallExpression => {
+        .CallExpression, .NewExpression => {
             var arguments: std.ArrayList(*const ExpressionIR) = .empty;
             for (value.arguments) |argument| try arguments.append(allocator, try expressionIR(allocator, argument, parsed));
+            const callee = try expressionIR(allocator, value.callee.?, parsed);
+            const owned = try arguments.toOwnedSlice(allocator);
+            if (value.type == .NewExpression) return box(allocator, .{
+                .construct = .{
+                    .callee = callee,
+                    .arguments = owned,
+                },
+            });
             return box(allocator, .{
                 .call = .{
-                    .callee = try expressionIR(allocator, value.callee.?, parsed),
-                    .arguments = try arguments.toOwnedSlice(allocator),
+                    .callee = callee,
+                    .arguments = owned,
+                    .optional = value.optional,
                 },
             });
         },
+        .ChainExpression => return box(allocator, .{
+            .chain = .{
+                .expression = try expressionIR(allocator, value.expression.?, parsed),
+            },
+        }),
         .ArrowFunctionExpression, .FunctionExpression, .FunctionDeclaration => {
             var scoped = parsed.*;
             scoped.component.prop_bindings = try parsed.component.prop_bindings.clone();
@@ -759,6 +799,11 @@ fn visitExpression(set: *CapabilitySet, expression: *const ExpressionIR) void {
             visitExpression(set, c.callee);
             for (c.arguments) |argument| visitExpression(set, argument);
         },
+        .construct => |c| {
+            visitExpression(set, c.callee);
+            for (c.arguments) |argument| visitExpression(set, argument);
+        },
+        .chain => |c| visitExpression(set, c.expression),
         .member => |m| {
             visitExpression(set, m.object);
             if (m.property == .expression) visitExpression(set, m.property.expression);
@@ -886,11 +931,16 @@ pub fn createPjsxModuleWithResolver(allocator: Allocator, original_source: []con
             };
         }
     }
+    const plain = parsed.component.reactive == null and parsed.family == null;
+    const declarations = try moduleDeclarations(allocator, parsed, filename);
+    const shared_code: ?[]const u8 = if (plain) try sharedCode(allocator, declarations) else null;
     const module = try allocator.create(ModuleIR);
     module.* = .{
         .filename = filename,
         .source = source,
         .component = .{
+            .shared_code = shared_code,
+            .declarations = declarations,
             .name = parsed.component.name,
             .locals = try localBindingsIR(allocator, parsed),
             .snapshots = try snapshotProps(allocator, parsed),
@@ -1005,6 +1055,48 @@ fn assertedArray(allocator: Allocator, node: *Node, parsed: *const analyze.Parse
         current = current.expression.?;
     }
     return null;
+}
+
+/// A plain module's top-level functions and constants other than components (a component
+/// is capitalised), as type-stripped JS, so an island importing one of them can run it in
+/// the browser. Null when the module has none.
+fn sharedCode(allocator: Allocator, declarations: []const DeclarationIR) Error!?[]const u8 {
+    if (declarations.len == 0) return null;
+    var parts: std.ArrayList([]const u8) = .empty;
+    for (declarations) |declaration| {
+        if (std.ascii.isUpper(declaration.name[0])) continue;
+        try parts.append(allocator, declaration.code);
+    }
+    if (parts.items.len == 0) return null;
+    return try std.mem.join(allocator, "\n", parts.items);
+}
+
+/// A module's top-level functions and constants other than its component and its
+/// state, each as type-stripped JS.
+fn moduleDeclarations(allocator: Allocator, parsed: *const analyze.ParsedModule, filename: []const u8) Error![]const DeclarationIR {
+    const src = parsed.canonical;
+    var found: std.ArrayList(DeclarationIR) = .empty;
+    for (parsed.program.statements) |statement| {
+        const declaration = (if (statement.type == .ExportNamedDeclaration) statement.declaration else statement) orelse continue;
+        const name: ?[]const u8 = switch (declaration.type) {
+            .FunctionDeclaration => if (declaration.id) |id| id.name else null,
+            .VariableDeclaration => if (declaration.declarations.len == 1 and declaration.declarations[0].id.?.type == .Identifier)
+                declaration.declarations[0].id.?.name
+            else
+                null,
+            else => null,
+        };
+        const helper = name orelse continue;
+        if (helper.len == 0 or util.eql(helper, parsed.component.name)) continue;
+        if (parsed.component.reactive) |reactive| if (util.eql(helper, reactive.state_name)) continue;
+        if (parsed.family) |family| if (util.eql(helper, family.state_name)) continue;
+        const stripped = try strip_types.stripTypes(allocator, src[declaration.start..declaration.end], filename);
+        try found.append(allocator, .{
+            .name = helper,
+            .code = std.mem.trim(u8, stripped, "\n "),
+        });
+    }
+    return found.items;
 }
 
 fn refNames(allocator: Allocator, refs: []const analyze.RefBinding) Allocator.Error![]const []const u8 {
@@ -1210,6 +1302,22 @@ const Json = struct {
                     .number => |n| try self.num(n),
                     .expression => |x| try self.expression(x),
                 }
+                if (m.optional) {
+                    try self.key("optional", false);
+                    try self.raw("true");
+                }
+            },
+            .chain => |c| {
+                try self.str("chain");
+                try self.key("expression", false);
+                try self.expression(c.expression);
+            },
+            .construct => |c| {
+                try self.str("construct");
+                try self.key("callee", false);
+                try self.expression(c.callee);
+                try self.key("arguments", false);
+                try self.expressions(c.arguments);
             },
             .unary => |u| {
                 try self.str("unary");
@@ -1275,6 +1383,10 @@ const Json = struct {
                 try self.expression(c.callee);
                 try self.key("arguments", false);
                 try self.expressions(c.arguments);
+                if (c.optional) {
+                    try self.key("optional", false);
+                    try self.raw("true");
+                }
             },
             .function => |f| {
                 try self.str("function");

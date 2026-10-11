@@ -1442,11 +1442,55 @@ pub fn collectStringConstants(allocator: Allocator, program: *Node) Error!Ordere
 }
 
 pub fn collectClassTokens(allocator: Allocator, parsed: *const ParsedModule) Error![]const []const u8 {
+    return collectClassTokensIn(allocator, parsed.program, parsed.component.root, &parsed.component.prop_bindings, false);
+}
+
+/// Every class token a module's JSX names, in every function, with no component schema:
+/// for chrome that never renders on the server (the editor's shell), whose props need not
+/// lower. A bare name or member as a class value is a passed-through prop and adds nothing.
+pub fn collectSourceClassTokens(allocator: Allocator, source: []const u8, filename: []const u8) Error![]const []const u8 {
+    const canonical = try canonicalize_mod.canonicalize(allocator, source);
+    const program = parser.parse(allocator, canonical.code, filename) catch |e| switch (e) {
+        error.OutOfMemory => return e,
+        error.Pjsx => {
+            const message = try allocator.dupe(u8, err.message());
+            return err.fail("pjsx: {s}: {s}", .{ filename, message });
+        },
+    };
+    const bindings = OrderedMap([]const u8).init(allocator);
+    return collectClassTokensIn(allocator, program, program, &bindings, true);
+}
+
+/// A class template literal names whole classes: a value never runs into a class's text
+/// (`pl-${n}`, `${tone}-500`), which no build could list.
+fn wholeClassNames(literal: *Node) Error!void {
+    for (literal.quasis, 0..) |quasi, index| {
+        const text = quasi.cooked orelse quasi.raw;
+        if (text.len == 0) continue;
+        const before_value = index + 1 < literal.quasis.len;
+        const after_value = index > 0;
+        if ((before_value and !std.ascii.isWhitespace(text[text.len - 1])) or
+            (after_value and !std.ascii.isWhitespace(text[0])))
+        {
+            return err.failMsg("pjsx: a class is never built from a value (`pl-${n}`): name each " ++
+                "class whole, picked from a Record of classes, or pass the value as a CSS variable in `style`");
+        }
+    }
+}
+
+fn collectClassTokensIn(
+    allocator: Allocator,
+    program: *Node,
+    root: *Node,
+    prop_bindings: *const OrderedMap([]const u8),
+    pass_through: bool,
+) Error![]const []const u8 {
     var classes = util.StringSet.init(allocator);
-    const finite_maps = try collectFiniteStringMaps(allocator, parsed.program);
+    const finite_maps = try collectFiniteStringMaps(allocator, program);
     const Ctx = struct {
         allocator: Allocator,
-        parsed: *const ParsedModule,
+        bindings: *const OrderedMap([]const u8),
+        pass_through: bool,
         classes: *util.StringSet,
         finite_maps: *const FiniteStringMaps,
 
@@ -1455,6 +1499,17 @@ pub fn collectClassTokens(allocator: Allocator, parsed: *const ParsedModule) Err
         }
 
         fn visit(self: @This(), node: *Node) anyerror!void {
+            // Code that writes a class itself does so through PublrJS's `mergeClasses("…")`
+            // or `nameOf("…")`: the manifest reads their literal.
+            if (node.type == .CallExpression) {
+                const callee = node.callee orelse return;
+                if (callee.type != .Identifier) return;
+                if (!util.eql(callee.name, "mergeClasses") and !util.eql(callee.name, "nameOf")) return;
+                if (node.arguments.len == 0) return;
+                const argument = unwrap(node.arguments[0]);
+                if (argument.type == .Literal and argument.value == .string) try self.add(argument.value.string);
+                return;
+            }
             if (node.type != .JSXAttribute) return;
             const name_node = node.name_node.?;
             if (name_node.type != .JSXIdentifier) return;
@@ -1487,6 +1542,7 @@ pub fn collectClassTokens(allocator: Allocator, parsed: *const ParsedModule) Err
                             try inner.outer.add(part.value.string);
                         } else if (part.type == .TemplateLiteral) {
                             inner.found.* = true;
+                            try wholeClassNames(part);
                             for (part.quasis) |quasi| try inner.outer.add(quasi.cooked orelse "");
                         }
                     }
@@ -1497,7 +1553,8 @@ pub fn collectClassTokens(allocator: Allocator, parsed: *const ParsedModule) Err
                 }, Parts.visitPart);
                 return;
             }
-            const bindings = &self.parsed.component.prop_bindings;
+            if (self.pass_through and (expression.type == .Identifier or expression.type == .MemberExpression)) return;
+            const bindings = self.bindings;
             const bound_class_prop: ?[]const u8 = if (expression.type == .Identifier)
                 bindings.get(expression.name)
             else if (expression.type == .MemberExpression and !expression.computed and expression.object.?.type == .Identifier and expression.property.?.type == .Identifier)
@@ -1518,6 +1575,7 @@ pub fn collectClassTokens(allocator: Allocator, parsed: *const ParsedModule) Err
                         try inner.outer.add(part.value.string);
                     } else if (part.type == .TemplateLiteral) {
                         inner.found.* = true;
+                        try wholeClassNames(part);
                         for (part.quasis) |quasi| try inner.outer.add(quasi.cooked orelse "");
                     } else if (part.type == .MemberExpression and part.computed and part.object.?.type == .Identifier) {
                         const map = inner.outer.finite_maps.get(part.object.?.name) orelse return;
@@ -1533,9 +1591,10 @@ pub fn collectClassTokens(allocator: Allocator, parsed: *const ParsedModule) Err
             if (!found) return err.failMsg("pjsx: dynamic class expressions need statically enumerable literals");
         }
     };
-    ast.walk(parsed.component.root, Ctx{
+    ast.walk(root, Ctx{
         .allocator = allocator,
-        .parsed = parsed,
+        .bindings = prop_bindings,
+        .pass_through = pass_through,
         .classes = &classes,
         .finite_maps = &finite_maps,
     }, Ctx.visit) catch |e| return @as(Error, @errorCast(e));
@@ -1579,6 +1638,39 @@ test "parsePjsx extracts the component, schema and class tokens" {
     try std.testing.expectEqual(@as(usize, 4), classes.len);
     try std.testing.expectEqualStrings("inline-flex", classes[0]);
     try std.testing.expectEqualStrings("text-foreground", classes[3]);
+}
+
+test "collectSourceClassTokens reads every function's JSX and needs no schema" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const classes = try collectSourceClassTokens(a,
+        \\export type Props = { onChange?: (html: string) => void; policy?: { preset?: string } };
+        \\function Row({ wide }: { wide: boolean }) { return <li class={wide ? "w-full" : "w-1/2"} />; }
+        \\export function Shell({ classes }: Props & { classes?: string }) {
+        \\  return <div class="flex"><span class={classes} /><Row wide /></div>;
+        \\}
+        \\export function Other() { return <p class="mt-2" />; }
+    , "Shell.ptsx");
+    try std.testing.expectEqual(@as(usize, 4), classes.len);
+    try std.testing.expectEqualStrings("flex", classes[0]);
+    try std.testing.expectEqualStrings("mt-2", classes[1]);
+}
+
+test "a class built from a value fails the build, a whole class picked by a value does not" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try std.testing.expectError(error.Pjsx, collectSourceClassTokens(a,
+        \\export function Row({ depth }: { depth: number }) { return <li class={`flex pl-${depth}`} />; }
+    , "Row.ptsx"));
+    try std.testing.expect(std.mem.indexOf(u8, err.message(), "never built from a value") != null);
+
+    const classes = try collectSourceClassTokens(a,
+        \\export function Row({ open }: { open: boolean }) { return <li class={`flex ${open ? "" : "hidden"}`} />; }
+    , "Row.ptsx");
+    try std.testing.expectEqual(@as(usize, 2), classes.len);
 }
 
 test "parsePjsx requires one component and derives an empty props contract" {

@@ -13,9 +13,11 @@
 //! - $$show/$$for/$$key/$$class/$$text (canonical spellings of the dialect
 //!   directives) → when()/show()/list()/class merge/text child
 //! - $$on$event$mods → wrapped listeners (prevent/stop/key filters)
-//! - live props: component call sites pass getters. Reading props.x remains
-//!   live; destructuring is a normal JavaScript snapshot, with defaults
-//!   evaluated once and only for undefined.
+//! - live props: component call sites pass getters. Reading props.x stays
+//!   live, and so does a destructured prop: each binding becomes a read of
+//!   the props object, its default applied only while the prop is undefined.
+//!   Props carrying JSX are read once. Patterns that cannot stay exact keep
+//!   JavaScript's snapshot (see rewriteDestructuredProps).
 //!
 //! Source maps: the reference returns a MagicString hires map. This port
 //! returns `map = null`; the CMS consumes the code only, and a faithful
@@ -284,6 +286,158 @@ const Transformer = struct {
         }
     }
 
+    /// Destructured props stay live: each binding becomes a read of the props object,
+    /// so a caller's getter is evaluated where the component reads it, as `props.x`
+    /// would be. A default applies only while the prop is undefined; one that is not a
+    /// plain value is evaluated once, on first need. Props carrying JSX (children,
+    /// elements, nodes) are read once at the top of the body, so a read never builds
+    /// the caller's nodes again. A pattern this cannot keep exact (a rest element, a
+    /// computed key, a nested pattern, a binding the body assigns, a default reading
+    /// another binding, props whose types cannot be inferred) stays an ordinary
+    /// snapshot. Returns whether the pattern was rewritten.
+    fn rewriteDestructuredProps(self: *Transformer, fn_node: *Node, prop_alias: Str) Error!bool {
+        const parameter = fn_node.params[0];
+        const pattern = if (parameter.type == .AssignmentPattern) parameter.left.? else parameter;
+        const body = fn_node.body.?;
+        std.debug.assert(pattern.type == .ObjectPattern);
+
+        var locals = util.StringSet.init(self.a);
+        for (pattern.properties) |property| {
+            if (property.type == .RestElement or property.computed) return false;
+            const value = property.value_node orelse return false;
+            const local = if (value.type == .AssignmentPattern) value.left.? else value;
+            if (local.type != .Identifier) return false;
+            try locals.put(local.name, {});
+        }
+        for (pattern.properties) |property| {
+            const value = property.value_node.?;
+            if (value.type == .AssignmentPattern and try mentionsAny(self.a, value.right.?, &locals)) return false;
+        }
+        if (try assignsAny(self.a, body, &locals)) return false;
+
+        // Which props carry JSX comes from their types: without them nothing can be told.
+        // A props type with data no target can lower (an object, a record) is still
+        // told apart by its JSX fields alone: the DOM transform needs nothing more.
+        const inferred: ?@import("types.zig").InferredProps = @import("types.zig").infer(self.a, self.program, self.source, self.filename, fn_node, self.resolver) catch |e| switch (e) {
+            error.OutOfMemory => return e,
+            else => null,
+        };
+        const jsx_fields: ?util.StringSet = if (inferred == null) @import("types.zig").jsxFields(self.a, self.program, self.source, self.filename, fn_node, self.resolver) catch |e| switch (e) {
+            error.OutOfMemory => return e,
+            else => return false,
+        } else null;
+
+        var prop_map = util.OrderedMap(Str).init(self.a);
+        var prelude: std.ArrayList(u8) = .empty;
+        for (pattern.properties) |property| {
+            const key = (try @import("analyze.zig").propertyName(self.a, property)) orelse return false;
+            const value = property.value_node.?;
+            const local = if (value.type == .AssignmentPattern) value.left.? else value;
+            const access = if (isIdentifierName(key))
+                try self.f("{s}.{s}", .{ prop_alias, key })
+            else
+                try self.f("{s}[{s}]", .{ prop_alias, try self.json(key) });
+            const default: ?*Node = if (value.type == .AssignmentPattern) value.right.? else null;
+            const default_text: ?Str = if (default) |d| self.src(d.start, d.end) else null;
+
+            const known = if (inferred) |props| props.schema.get(key) else null;
+            const carries_jsx = util.eql(key, "children") or if (jsx_fields) |fields| fields.has(key) else if (known) |schema| switch (schema.type) {
+                .children, .node, .element => true,
+                else => false,
+            } else false;
+            if (carries_jsx) {
+                // Nodes are read once; a caller's text or number (`{state.label}`) stays a
+                // live read, so the component shows it as it changes.
+                const once = try self.f("{s}$j_{s}", .{ prop_alias, local.name });
+                try prelude.appendSlice(self.a, if (default_text) |d|
+                    try self.f(" const {s} = {s} === undefined ? {s} : {s};", .{ once, access, d, access })
+                else
+                    try self.f(" const {s} = {s};", .{ once, access }));
+                const live = if (default_text != null) try self.f("({s} === undefined ? {s} : {s})", .{ access, once, access }) else access;
+                try prop_map.put(local.name, try self.f("(typeof {s} === \"string\" || typeof {s} === \"number\" ? {s} : {s})", .{ once, once, live, once }));
+                continue;
+            }
+            if (default_text) |d| {
+                if (isPlainValue(@import("analyze.zig").unwrap(default.?))) {
+                    try prop_map.put(local.name, try self.f("({s} === undefined ? {s} : {s})", .{ access, d, access }));
+                } else {
+                    const memo = try self.f("{s}$d_{s}", .{ prop_alias, local.name });
+                    try prelude.appendSlice(self.a, try self.f(" let {s};", .{memo}));
+                    // A one-slot box, so a default that is itself undefined is still made once.
+                    try prop_map.put(local.name, try self.f("({s} === undefined ? ({s} || ({s} = [{s}]))[0] : {s})", .{ access, memo, memo, d, access }));
+                }
+            } else {
+                try prop_map.put(local.name, access);
+            }
+        }
+        if (prelude.items.len > 0 and body.type != .BlockStatement) return false;
+
+        const fallback: Str = if (parameter.type == .AssignmentPattern)
+            try self.f(" = {s}", .{self.src(parameter.right.?.start, parameter.right.?.end)})
+        else
+            "";
+        const ta: Str = if (pattern.type_annotation) |ta| self.src(ta.start, ta.end) else "";
+        try self.ident_edits.append(self.a, .{
+            .start = parameter.start,
+            .end = parameter.end,
+            .text = try util.concat(self.a, &.{ prop_alias, ta, fallback }),
+        });
+        if (prelude.items.len > 0) {
+            try self.ident_edits.append(self.a, .{
+                .start = body.start + 1,
+                .end = body.start + 1,
+                .text = prelude.items,
+            });
+        }
+        try self.rewriteBody(body, &prop_map);
+        return true;
+    }
+
+    fn isIdentifierName(name: Str) bool {
+        if (name.len == 0 or std.ascii.isDigit(name[0])) return false;
+        for (name) |c| if (!std.ascii.isAlphanumeric(c) and c != '_' and c != '$') return false;
+        return true;
+    }
+
+    /// A default that is the same value on every evaluation: a literal, a name, a
+    /// property path, a negated literal.
+    fn isPlainValue(node: *Node) bool {
+        return switch (node.type) {
+            .Literal, .Identifier => true,
+            .TemplateLiteral => node.expressions.len == 0,
+            .MemberExpression => !node.computed and isPlainValue(node.object.?),
+            .UnaryExpression => isPlainValue(node.argument.?),
+            else => false,
+        };
+    }
+
+    /// Whether `node` reads any of `names` (conservatively: shadowing is ignored).
+    fn mentionsAny(a: Allocator, node: *Node, names: *const util.StringSet) Error!bool {
+        if (node.type == .Identifier) return names.has(node.name);
+        if (node.type == .MemberExpression and !node.computed) return mentionsAny(a, node.object.?, names);
+        if (node.type == .Property and !node.computed) return mentionsAny(a, node.value_node.?, names);
+        if (node.type.isTs()) return false;
+        for (try childNodes(a, node)) |child| if (try mentionsAny(a, child, names)) return true;
+        return false;
+    }
+
+    /// Whether `node` assigns to or updates any of `names` (conservatively: shadowing
+    /// is ignored).
+    fn assignsAny(a: Allocator, node: *Node, names: *const util.StringSet) Error!bool {
+        if (node.type == .AssignmentExpression) {
+            var assigned = util.StringSet.init(a);
+            try collectPatternNames(node.left.?, &assigned);
+            for (assigned.keys()) |name| if (names.has(name)) return true;
+        }
+        if (node.type == .UpdateExpression) {
+            const argument = node.argument.?;
+            if (argument.type == .Identifier and names.has(argument.name)) return true;
+        }
+        if (node.type.isTs()) return false;
+        for (try childNodes(a, node)) |child| if (try assignsAny(a, child, names)) return true;
+        return false;
+    }
+
     fn findComponents(self: *Transformer, node: *Node, component_depth: usize) Error!void {
         if (isFnNode(node) and node.id != null and node.id.?.name.len > 0) {
             if (node.body) |body| try self.findRootFragments(body);
@@ -298,13 +452,14 @@ const Transformer = struct {
             try @import("types.zig").annotateGuards(self.a, self.program, self.source, self.filename, node, self.resolver);
             const parameter = node.params[0];
             const pattern = if (parameter.type == .AssignmentPattern) parameter.left.? else parameter;
-            // Destructuring is ordinary JavaScript: snapshot each property and
-            // evaluate defaults once, only for undefined, in binding order.
-            if (pattern.type == .Identifier) {
+            if (pattern.type == .Identifier or pattern.type == .ObjectPattern) {
                 var alias: Str = if (component_depth == 0) "$$p" else try self.f("$$p{d}", .{component_depth});
                 if (std.mem.indexOf(u8, self.source, alias) != null) alias = try self.f("{s}Props{d}", .{ self.runtime_name, component_depth });
-                try self.rewriteComponentProps(node, alias);
-                child_depth += 1;
+                const rewritten = if (pattern.type == .Identifier) blk: {
+                    try self.rewriteComponentProps(node, alias);
+                    break :blk true;
+                } else try self.rewriteDestructuredProps(node, alias);
+                if (rewritten) child_depth += 1;
             }
         }
         for (try childNodes(self.a, node)) |child| try self.findComponents(child, child_depth);
@@ -371,7 +526,15 @@ const Transformer = struct {
     fn branch(self: *Transformer, n: *Node) Error!Str {
         const inner = ast.unparen(n);
         if (inner.isJsx()) return (try self.emitJsx(inner)).code;
-        return try self.f("({s})", .{try self.textFor(inner)});
+        // A branch that is itself a JSX conditional stays reactive: a nested when(), not a
+        // ternary evaluated once when the outer branch is built.
+        const nested_conditional = inner.type == .ConditionalExpression and (hasJsx(inner.consequent.?) or hasJsx(inner.alternate.?));
+        const nested_guard = inner.type == .LogicalExpression and util.eql(inner.operator, "&&") and hasJsx(inner.right.?);
+        if (nested_conditional or nested_guard) return try self.emitChildExpr(inner);
+        // Any other arm (a string, a number, an expression) is text: a fragment of one
+        // child, so the branch mounts nodes like a JSX arm does.
+        try self.used.put("Fragment", {});
+        return try self.f("Fragment({{ children: [{s}] }})", .{try self.emitChildExpr(inner)});
     }
 
     const MapMatch = struct {
@@ -389,7 +552,7 @@ const Transformer = struct {
         const body = arrow.body.?;
         if (body.type != .BlockStatement) {
             const row = ast.unparen(body);
-            if (row.isJsx()) return .{
+            if (isRowTemplate(row)) return .{
                 .target = callee.object.?,
                 .arrow = arrow,
                 .row = row,
@@ -402,7 +565,7 @@ const Transformer = struct {
         const last = body.statements[body.statements.len - 1];
         if (last.type != .ReturnStatement or last.argument == null) return null;
         const row = ast.unparen(last.argument.?);
-        if (row.isJsx()) return .{
+        if (isRowTemplate(row)) return .{
             .target = callee.object.?,
             .arrow = arrow,
             .row = row,
@@ -410,11 +573,33 @@ const Transformer = struct {
         return null;
     }
 
+    /// A row is JSX, or a JSX conditional (`cond && <X/>`, `cond ? <A/> : <B/>`)
+    /// that lowers to a when() inside the row. Left as a plain expression, the
+    /// map would build fresh nodes on every read of an insert and never settle.
+    fn isRowTemplate(row: *Node) bool {
+        if (row.isJsx()) return true;
+        if (row.type == .LogicalExpression and util.eql(row.operator, "&&")) return hasJsx(row.right.?);
+        if (row.type == .ConditionalExpression) return hasJsx(row.consequent.?) or hasJsx(row.alternate.?);
+        return false;
+    }
+
+    /// The `key` a conditional row's JSX arms carry, the first arm that has one.
+    fn conditionalRowKey(self: *Transformer, row: *Node) Error!?Str {
+        const node = ast.unparen(row);
+        if (node.isJsx()) return (try self.emitJsx(node)).key;
+        if (node.type == .LogicalExpression and util.eql(node.operator, "&&")) return try self.conditionalRowKey(node.right.?);
+        if (node.type == .ConditionalExpression) {
+            if (try self.conditionalRowKey(node.consequent.?)) |key| return key;
+            return try self.conditionalRowKey(node.alternate.?);
+        }
+        return null;
+    }
+
     fn emitList(self: *Transformer, target: *Node, params: []*Node, row: *Node, block: ?*Node) Error!Str {
         try self.used.put("list", {});
         const item_p: Str = if (params.len > 0) try self.slice(params[0].start, params[0].end) else "$it";
         const idx_p: Str = if (params.len > 1) try self.slice(params[1].start, params[1].end) else "$i";
-        const key_expr = (try self.emitJsx(row)).key orelse idx_p;
+        const key_expr = (if (row.isJsx()) (try self.emitJsx(row)).key else try self.conditionalRowKey(row)) orelse idx_p;
         const previous_edits = try self.a.dupe(Edit, self.ident_edits.items);
         defer {
             self.ident_edits.clearRetainingCapacity();
@@ -433,7 +618,10 @@ const Transformer = struct {
             try self.ident_edits.append(self.a, old);
         }
         std.mem.sort(Edit, self.ident_edits.items, {}, lessEdit);
-        const emitted = try self.emitJsx(row);
+        const emitted: Emitted = if (row.isJsx()) try self.emitJsx(row) else .{
+            .code = try self.emitChildExpr(row),
+            .key = null,
+        };
         if (block) |b| {
             var prelude: std.ArrayList(u8) = .empty;
             for (b.statements[0 .. b.statements.len - 1]) |statement| {
@@ -1110,6 +1298,7 @@ const Transformer = struct {
 
         var body: std.ArrayList(u8) = .empty;
         var names: StrList = .empty;
+        var lets = util.StringSet.init(self.a);
         var forwards: std.ArrayList(u8) = .empty;
         var forwarded = util.StringSet.init(self.a);
         for (self.program.statements) |statement| {
@@ -1134,6 +1323,7 @@ const Transformer = struct {
                     const id = item.id.?;
                     if (id.type != .Identifier) return errAt("a family module's declarations need identifier names", id);
                     try names.append(self.a, id.name);
+                    if (declaration.kind == .let) try lets.put(id.name, {});
                     if (exported) {
                         try forwarded.put(id.name, {});
                         try forwards.appendSlice(self.a, try self.f("export const {s} = {s}.{s}({s});\n", .{ id.name, family, if (action) "action" else "field", try self.json(id.name) }));
@@ -1162,19 +1352,35 @@ const Transformer = struct {
 
         // The root component creates its instance before its props are read
         // (a children getter builds the parts), and its body reaches the
-        // carried locals that have no forwarded export.
-        var taken = util.StringSet.init(self.a);
-        for (root.params) |param| try collectPatternNames(param, &taken);
-        if (root.body) |fn_body| for (fn_body.statements) |st| try collectStatementDecls(st, &taken);
-        var private_locals: StrList = .empty;
-        for (names.items) |name| if (!taken.has(name) and !forwarded.has(name)) try private_locals.append(self.a, name);
-        const fn_body = root.body orelse return errAt("a family root needs a function body", root);
-        if (private_locals.items.len > 0)
-            try self.ident_edits.append(self.a, .{
-                .start = fn_body.start + 1,
-                .end = fn_body.start + 1,
-                .text = try self.f("\n  const {{ {s} }} = {s}.current();", .{ try util.join(self.a, private_locals.items, ", "), family }),
-            });
+        // carried locals that have no forwarded export. Every other component
+        // in the module reaches the ones it reads from the instance it renders
+        // under, the root's above it, never a second one.
+        if (root.body == null) return errAt("a family root needs a function body", root);
+        for (self.program.statements) |statement| {
+            const declaration = (if (statement.type == .ExportNamedDeclaration) statement.declaration else statement) orelse continue;
+            if (declaration.type != .FunctionDeclaration or declaration.id == null) continue;
+            if (declaration != root and !isComponentName(declaration.id.?.name)) continue;
+            const fn_body = declaration.body orelse continue;
+            var taken = util.StringSet.init(self.a);
+            for (declaration.params) |param| try collectPatternNames(param, &taken);
+            for (fn_body.statements) |st| try collectStatementDecls(st, &taken);
+            var private_locals: StrList = .empty;
+            for (names.items) |name| {
+                if (taken.has(name) or forwarded.has(name)) continue;
+                if (declaration != root) {
+                    var one = util.StringSet.init(self.a);
+                    try one.put(name, {});
+                    if (!try mentionsAny(self.a, fn_body, &one)) continue;
+                }
+                try private_locals.append(self.a, name);
+            }
+            if (private_locals.items.len > 0)
+                try self.ident_edits.append(self.a, .{
+                    .start = fn_body.start + 1,
+                    .end = fn_body.start + 1,
+                    .text = try self.f("\n  const {{ {s} }} = {s}.current();", .{ try util.join(self.a, private_locals.items, ", "), family }),
+                });
+        }
         for (self.program.statements) |statement| {
             if (statement.type == .ExportNamedDeclaration and statement.declaration == root) {
                 try self.ident_edits.append(self.a, .{
@@ -1190,7 +1396,11 @@ const Transformer = struct {
             }
         }
 
-        return try self.f("const {s} = {s}.family({s}, () => {{\n{s}  return {{ {s} }};\n}});\n{s}", .{ family, self.runtime_name, try self.json(root_name), body.items, try util.join(self.a, names.items, ", "), forwards.items });
+        // A carried `let` is read through the instance as it is now, so a part
+        // sees what an action last assigned, as it would at module level.
+        var members: StrList = .empty;
+        for (names.items) |name| try members.append(self.a, if (lets.has(name)) try self.f("get {s}() {{ return {s}; }}, set {s}($$v) {{ {s} = $$v; }}", .{ name, name, name, name }) else name);
+        return try self.f("const {s} = {s}.family({s}, () => {{\n{s}  return {{ {s} }};\n}});\n{s}", .{ family, self.runtime_name, try self.json(root_name), body.items, try util.join(self.a, members.items, ", "), forwards.items });
     }
 
     fn run(self: *Transformer, opts: Options) Error!Result {
@@ -1615,11 +1825,11 @@ test "a family root carries refs, helpers and module effects and skips names its
         \\  return <div ref={root}>{toggles}</div>;
         \\}
     , "Disclosure.ptsx");
-    try expectContains(code, "export const Disclosure = $$domFamily.root(function Disclosure({ KEYS = [] }) {\n  const toggles = 1;");
+    try expectContains(code, "export const Disclosure = $$domFamily.root(function Disclosure($$p) { let $$p$d_KEYS;\n  const toggles = 1;");
     try expectNotContains(code, "$$domFamily.current()");
     try expectContains(code, "  let toggles = 0;");
     try expectContains(code, "  Publr.effect(() => {");
-    try expectContains(code, "  return { state, root, toggles, KEYS, keydown };");
+    try expectContains(code, "  return { state, root, get toggles() { return toggles; }, set toggles($$v) { toggles = $$v; }, KEYS, keydown };");
     try expectContains(code, "export const root = $$domFamily.field(\"root\");");
     try expectContains(code, "export const keydown = $$domFamily.action(\"keydown\");");
     try expectContains(code, "export const SIZES = [\"sm\", \"md\"];");
@@ -1640,6 +1850,55 @@ test "a family root reaches carried locals without a forwarded export" {
     try expectContains(code, "$$dom.family(\"Menu\", () => {\n  const state = Publr.reactive({ open: false });\n  const options = () => [];\n  return { state, options };\n});\nexport const state = $$domFamily.field(\"state\");\n");
 }
 
+test "every component in a family module reaches the private values it reads from the instance" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const code = try transformTest(arena.allocator(),
+        \\export const state = Publr.reactive({ picks: 0 });
+        \\const prefix = "#";
+        \\let added = 1;
+        \\function label(id: number) { return prefix + id; }
+        \\export function Parts() {
+        \\  return <ul>{[1, 2].map((id) => <li key={id}><Item id={id} /></li>)}</ul>;
+        \\}
+        \\export function Item({ id }: { id: number }) {
+        \\  return <b>{label(id)}{state.picks}</b>;
+        \\}
+        \\function Summary({ prefix }: { prefix: string }) {
+        \\  return <p>{prefix}{added}</p>;
+        \\}
+        \\export function Plain() {
+        \\  return <i>{state.picks}</i>;
+        \\}
+    , "Parts.ptsx");
+    try expectContains(code, "return { state, prefix, get added() { return added; }, set added($$v) { added = $$v; }, label };");
+    try expectContains(code, "export const Parts = $$domFamily.root(function Parts() {\n  const { prefix, added, label } = $$domFamily.current();");
+    try expectContains(code, "export function Item($$p) {\n  const { label } = $$domFamily.current();");
+    try expectContains(code, "function Summary($$p) {\n  const { added } = $$domFamily.current();");
+    try expectContains(code, "export function Plain() {\n  return");
+    try expectNotContains(code, "$$domFamily.root(function Item");
+}
+
+test "a map callback whose row is a JSX conditional lowers as a list of when rows" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const code = try transformTest(arena.allocator(),
+        \\export function Rows({ rows }: { rows: { id: number; on: boolean }[] }) {
+        \\  return (
+        \\    <div>
+        \\      {rows.map((row) => row.on && (<b key={row.id}>{row.id}</b>))}
+        \\      {rows.map((row) => (row.on ? <b key={row.id}>on</b> : <i>off</i>))}
+        \\      {rows.map((row) => { const off = !row.on; return off ? <i>off</i> : <b>on</b>; })}
+        \\    </div>
+        \\  );
+        \\}
+    , "Rows.ptsx");
+    try expectNotContains(code, ".map(");
+    try expectContains(code, "$$dom.list(() => $$p.rows, ($$p1, $i) => $$p1.id, ($$p1, $i) => $$dom.when(() => $$p1().on === true, () => $$dom.element(\"b\"");
+    try expectContains(code, "$$dom.list(() => $$p.rows, ($$p1, $i) => $$p1.id, ($$p1, $i) => $$dom.when(() => $$p1().on, () => $$dom.element(\"b\"");
+    try expectContains(code, "$$dom.list(() => $$p.rows, ($$p1, $i) => $i, ($$p1, $i) => { const off = !$$p1().on; return $$dom.when(() => off, ");
+}
+
 test "a block-bodied map callback lowers as a list with its statements per row" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -1655,7 +1914,7 @@ test "a block-bodied map callback lowers as a list with its statements per row" 
         \\  );
         \\}
     , "Rows.ptsx");
-    try expectContains(code, "$$dom.list(() => rows, ($$p, $i) => $$p.id, ($$p, $i) => { const label = $$p().name.toUpperCase(); return ");
+    try expectContains(code, "$$dom.list(() => $$p.rows, ($$p1, $i) => $$p1.id, ($$p1, $i) => { const label = $$p1().name.toUpperCase(); return ");
     try expectContains(code, "$$dom.insert(() => label)");
 }
 
@@ -1679,8 +1938,125 @@ test "hidden on component calls rides the show transport with inverted polarity"
         \\}
     , "icon-pair.ptsx");
     try expectContains(code, "show($$dom.component(Icon,");
-    try expectContains(code, "!!active");
-    try expectContains(code, "!(active || muted)");
+    try expectContains(code, "!!($$p.active === undefined ? false : $$p.active)");
+    try expectContains(code, "!(($$p.active === undefined ? false : $$p.active) || ($$p.muted === undefined ? false : $$p.muted))");
+}
+
+test "a JSX conditional inside a branch is a nested when, not a one-time ternary" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const code = try transformTest(arena.allocator(),
+        \\export function Card({ a, b }: { a: boolean; b: boolean }) {
+        \\  return <div>{a ? <i /> : b ? <b /> : <u />}</div>;
+        \\}
+    , "Card.ptsx");
+    try expectContains(code, "() => $$dom.when(() => $$p.b, ");
+}
+
+test "a ternary's text arm beside a JSX arm mounts as text, not a raw value" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const code = try transformTest(arena.allocator(),
+        \\export function Note({ href, label }: { href: string; label: string }) {
+        \\  return <p>{href ? <a href={href}>Devices</a> : "Devices"}{href ? <i /> : label}</p>;
+        \\}
+    , "Note.ptsx");
+    try expectContains(code, "$$dom.fragment(() => [$$dom.literal(\"Devices\")])");
+    try expectContains(code, "$$dom.fragment(() => [$$dom.insert(() => $$p.label)])");
+}
+
+test "props types may hold methods, generic returns and the browser's own types" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const code = try transformTest(arena.allocator(),
+        \\type Host = { upload(file: File): Promise<{ src: string }>; pick?(kind: string): Promise<Array<string>>; };
+        \\export function Field({ control, host }: { control: HTMLTextAreaElement; host?: Host }) {
+        \\  return <div data-ready={host ? "yes" : "no"}>{control.name}</div>;
+        \\}
+    , "Field.ptsx");
+    try expectContains(code, "data-ready");
+}
+
+test "destructured props are live reads, and props carrying JSX are read once" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const code = try transformTest(arena.allocator(),
+        \\type Props = { pressed?: boolean; "aria-label"?: string; size?: string; items?: string[]; children?: JSX.Element };
+        \\export function Toggle({ pressed, "aria-label": label, size = "md", items = [], children }: Props) {
+        \\  const onKey = () => pressed;
+        \\  return <button aria-pressed={pressed} aria-label={label} data-size={size} data-count={items.length} onKeyDown={onKey}>{children}</button>;
+        \\}
+    , "Toggle.ptsx");
+    try expectContains(code, "function Toggle($$p) { let $$p$d_items; const $$p$j_children = $$p.children;");
+    try expectContains(code, "() => $$p.pressed");
+    try expectContains(code, "$$p[\"aria-label\"]");
+    try expectContains(code, "$$p.size === undefined ? \"md\" : $$p.size");
+    try expectContains(code, "($$p$d_items || ($$p$d_items = [[]]))[0]");
+    try expectContains(code, "const onKey = () => $$p.pressed;");
+    try expectContains(code, "$$dom.insert(() => typeof $$p$j_children === \"string\" || typeof $$p$j_children === \"number\" ? $$p.children : $$p$j_children)");
+}
+
+test "a component's text child stays live through a props-destructuring receiver" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const code = try transformTest(arena.allocator(),
+        \\type LabelProps = { children?: JSX.Element; hint?: JSX.Element };
+        \\export function Label({ children, hint = "none" }: LabelProps) {
+        \\  return <span title="x">{children}{hint}</span>;
+        \\}
+        \\export function Card({ state }) {
+        \\  return <Label>{state.title}</Label>;
+        \\}
+    , "Label.ptsx");
+    // The caller's getter hands over the text itself, and the receiver reads it again
+    // whenever it is text: a title that changes shows the change.
+    try expectContains(code, "get children() {\n\treturn state.title;\n}");
+    try expectContains(code, "const $$p$j_children = $$p.children;");
+    try expectContains(code, "? $$p.children : $$p$j_children");
+    // A default applies while the prop is undefined, on the live read too.
+    try expectContains(code, "const $$p$j_hint = $$p.hint === undefined ? \"none\" : $$p.hint;");
+    try expectContains(code, "? $$p.hint === undefined ? $$p$j_hint : $$p.hint : $$p$j_hint");
+}
+
+test "destructured props stay live when a prop's type is data no target lowers" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const code = try transformTest(arena.allocator(),
+        \\type Row = { prop: string; label: string };
+        \\export function Item({ row, slot }: { row: Row; slot?: JSX.Element }) {
+        \\  return <span title={row.prop}>{row.label}{slot}</span>;
+        \\}
+    , "Item.ptsx");
+    // An object of data is read live, so a list row handed a new row object shows it;
+    // a JSX prop is still read once.
+    try expectContains(code, "function Item($$p) {");
+    try expectContains(code, "() => $$p.row.prop");
+    try expectContains(code, "const $$p$j_slot = $$p.slot;");
+}
+
+test "destructured props the rewrite cannot keep exact stay a snapshot" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const rest = try transformTest(a,
+        \\export function Rest({ label, ...others }: { label: string; title?: string }) {
+        \\  return <span title={others.title}>{label}</span>;
+        \\}
+    , "Rest.ptsx");
+    try expectContains(rest, "function Rest({ label, ...others })");
+    const assigned = try transformTest(a,
+        \\export function Assigned({ label }: { label: string }) {
+        \\  label = label.trim();
+        \\  return <span>{label}</span>;
+        \\}
+    , "Assigned.ptsx");
+    try expectContains(assigned, "function Assigned({ label })");
+    const chained = try transformTest(a,
+        \\export function Chained({ label, title = label }: { label: string; title?: string }) {
+        \\  return <span title={title}>{label}</span>;
+        \\}
+    , "Chained.ptsx");
+    try expectContains(chained, "function Chained({ label, title = label })");
 }
 
 test "portal, anchor, position and store directives lower to data-p attributes" {
@@ -1697,7 +2073,7 @@ test "portal, anchor, position and store directives lower to data-p attributes" 
     , "overlay.ptsx");
     try expectContains(overlay, "\"data-p-portal\", true");
     try expectContains(overlay, "\"data-p-anchor\", true");
-    try expectContains(overlay, "\"data-p-position\", () => align");
+    try expectContains(overlay, "\"data-p-position\", () => $$domProps0.align === undefined ? \"left\" : $$domProps0.align");
 
     const island = try transformTest(a,
         \\export const islandProps = {};

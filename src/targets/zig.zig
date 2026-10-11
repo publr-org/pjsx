@@ -31,6 +31,8 @@ const util = @import("../util.zig");
 const compiler = @import("../compiler.zig");
 const analyze = @import("../analyze.zig");
 const err = @import("../err.zig");
+const expression_js = @import("expression_js.zig");
+const slots_file = @import("zig_slots.zig");
 
 const NodeIR = compiler.NodeIR;
 const ExpressionIR = compiler.ExpressionIR;
@@ -81,6 +83,8 @@ const Type = union(enum) {
     state_root,
     /// A declared store ref (`ref={trigger}`); `code` is the raw ref name.
     ref_name,
+    /// A compiled expression's value as the server ran it: `rt.Value`.
+    value,
 
     const Enumeration = struct {
         name: []const u8,
@@ -163,6 +167,8 @@ const Module = struct {
     string_constants: []const Type.MapEntry = &.{},
     /// The module's client store registration, assembled into `stores.js`.
     store_registration: ?StoreRegistration,
+    /// A plain module's top-level helpers, for its compiled expressions' block.
+    declarations: []const compiler.DeclarationIR = &.{},
     /// Whether the module's root can carry the show/text transport: an
     /// element root, a component-call root, or a conditional whose arms can
     /// (the `asChild` Trigger pattern). A fragment root cannot — passing a
@@ -232,18 +238,22 @@ pub fn requestFields(comptime Request: type) []const Field {
     return comptime request_fields_of(Request);
 }
 
+/// The fields a view reads; a `publr_` field is the render's own (its engine), not one.
 fn request_fields_of(comptime Request: type) []const Field {
     const declared = @typeInfo(Request).@"struct".fields;
     var fields: [declared.len]Field = undefined;
-    for (declared, 0..) |field, index| {
-        fields[index] = .{
+    var count: usize = 0;
+    for (declared) |field| {
+        if (std.mem.startsWith(u8, field.name, "publr_")) continue;
+        fields[count] = .{
             .name = field.name,
             .type = request_type(field.type),
             .zig_type = @typeName(field.type),
             .default = null,
         };
+        count += 1;
     }
-    const done = fields;
+    const done = fields[0..count].*;
     return &done;
 }
 
@@ -316,6 +326,20 @@ pub const Program = struct {
     /// Where in the request the path the project is served under is (`admin.base`): a root
     /// path in a URL attribute (`href="/admin"`) is written after it. Empty: written as is.
     url_base: []const u8 = "",
+    /// Each lowered module's compiled expressions, by module name: those its bindings
+    /// name, for `storesFile`, and those its render runs, for `serverFile`.
+    slots: *slots_file.Table,
+    server_slots: *slots_file.Table,
+    /// The request field holding the consumer's `rt.Expressions`: set, the server runs
+    /// the compiled expressions for their first values; empty, it lowers them to Zig.
+    expressions_field: []const u8 = "",
+    /// The request field holding the class book a render's classes are written with: set,
+    /// every class stack is merged with it (`rt.write_merged_in`); empty, with the consumer's
+    /// own.
+    classes_field: []const u8 = "",
+    /// The request field holding the page's set of templates written (`rt.Templates`): set,
+    /// a prototype that is all fixed text is written once per page; empty, every time.
+    templates_field: []const u8 = "",
 
     pub fn init(arena: std.mem.Allocator, irs: []const *const compiler.ModuleIR) Error!Program {
         var modules = try arena.alloc(Module, irs.len);
@@ -323,8 +347,14 @@ pub const Program = struct {
             modules[i] = try adapt_module(arena, ir);
         }
         std.mem.sort(Module, modules, {}, module_less_than);
+        const slots = try arena.create(slots_file.Table);
+        slots.* = .empty;
+        const server_slots = try arena.create(slots_file.Table);
+        server_slots.* = .empty;
         return .{
             .modules = modules,
+            .slots = slots,
+            .server_slots = server_slots,
         };
     }
 
@@ -335,10 +365,26 @@ pub const Program = struct {
                 var gen: Generator = .init(arena, module, program.modules);
                 gen.request = program.request;
                 gen.url_base = program.url_base;
-                return gen.lower_module();
+                gen.expressions_field = program.expressions_field;
+                gen.classes_field = program.classes_field;
+                gen.templates_field = program.templates_field;
+                const code = try gen.lower_module();
+                try program.slots.put(arena, module.name, try gen.used_slots(code, .bound));
+                try program.server_slots.put(arena, module.name, try gen.used_slots(code, .run));
+                return code;
             }
         }
         return err.fail("no module named {s} in the program", .{name});
+    }
+
+    /// The generated Zig for the named component followed by its compiled
+    /// expressions as comments, one per line: one text to read both from.
+    pub fn listing(program: Program, arena: std.mem.Allocator, name: []const u8) Error![]const u8 {
+        const code = try program.lower(arena, name);
+        var out: std.Io.Writer.Allocating = .init(arena);
+        try out.writer.writeAll(code);
+        for (program.slots.get(name) orelse &.{}) |slot| try out.writer.print("// slot {s}: {s}\n", .{ slot.name, slot.code });
+        return out.written();
     }
 
     /// `pub const <Name> = @import("<Name>.zig");` per module.
@@ -359,6 +405,9 @@ pub const Program = struct {
     /// JIT's manifest.
     pub fn classesFile(program: Program, arena: std.mem.Allocator) Error![]const u8 {
         var all: std.ArrayList([]const u8) = .empty;
+
+        // The wrapper a branch's body is drawn in when it is not one element.
+        try all.append(arena, "contents");
 
         for (program.modules) |module| {
             for (module.classes) |class| {
@@ -382,6 +431,25 @@ pub const Program = struct {
         return out.written();
     }
 
+    /// The compiled expressions as the server runs them: one function per module
+    /// taking its state and answering its slots; the consumer's engine makes a
+    /// module's table once per state (`__publr_table`) and runs slots on it with a
+    /// scope (`__publr_call`), each answering the value as JSON or `undefined`.
+    pub fn serverFile(program: Program, arena: std.mem.Allocator) Error![]const u8 {
+        var out: std.Io.Writer.Allocating = .init(arena);
+        try out.writer.writeAll("// Generated by pjsx_zig: the views' compiled expressions on the server — do not edit.\n");
+        try out.writer.writeAll(slots_file.intrinsics);
+        try out.writer.writeAll(slots_file.server_publr);
+        try out.writer.writeAll("const views = {\n");
+        for (program.modules) |module| {
+            const slots = program.server_slots.get(module.name) orelse continue;
+            if (slots.len == 0) continue;
+            try out.writer.print("{s}\n", .{try slots_file.serverModule(arena, module.name, slots, module.declarations)});
+        }
+        try out.writer.writeAll(slots_file.server_run);
+        return out.written();
+    }
+
     /// The client half of every reactive module: its store registration,
     /// carried in the IR, assembled into the one module the server serves.
     /// Deduped by store name — a family's parts share their root's
@@ -397,6 +465,23 @@ pub const Program = struct {
             \\
         );
 
+        // The intrinsics, when a browser slot calls one.
+        for (program.modules) |module| {
+            if (slots_file.calls_intrinsic(program.slots.get(module.name) orelse &.{})) {
+                try w.writeAll(slots_file.intrinsics);
+                break;
+            }
+        }
+
+        // Modules without a store of their own register theirs by name, first: registering a
+        // store hydrates the roots waiting for it, which may use them.
+        for (program.modules) |module| {
+            if (module.wire != null) continue;
+            const slots = program.slots.get(module.name) orelse continue;
+            if (slots.len == 0) continue;
+            try w.print("\n// {s}\n{s}\n", .{ module.name, try slots_file.block(arena, slots, module.declarations) });
+        }
+
         var seen: std.ArrayList([]const u8) = .empty;
 
         for (program.modules) |module| {
@@ -406,7 +491,14 @@ pub const Program = struct {
             } else false;
             if (duplicate) continue;
             try seen.append(arena, registration.store);
-            try w.print("\n// {s}\n{s}\n", .{ module.name, registration.code });
+            // The slots of every module owning this store, inside its factory.
+            var owned: std.ArrayList(slots_file.Slot) = .empty;
+            for (program.modules) |owner| {
+                const wire = owner.wire orelse continue;
+                if (!std.mem.eql(u8, wire.store, registration.store)) continue;
+                try owned.appendSlice(arena, program.slots.get(owner.name) orelse &.{});
+            }
+            try w.print("\n// {s}\n{s}\n", .{ module.name, try slots_file.withFactoryMember(arena, registration.code, owned.items) });
         }
 
         return out.written();
@@ -552,6 +644,7 @@ fn adapt_module(arena: std.mem.Allocator, ir: *const compiler.ModuleIR) Error!Mo
         else
             null,
         .transport_root = transports_at_root(component.root),
+        .declarations = component.declarations,
     };
 }
 
@@ -601,16 +694,42 @@ fn module_name_of(source: []const u8) []const u8 {
 /// name elsewhere in the props takes its parent's name in front (`OursSegmentsItem`).
 const TypeNames = std.StringHashMapUnmanaged(void);
 
+/// `preferred`, or, when the props already declare it (the same shape at another depth: a
+/// list of files on a field, on a group's part and on a repeater's cell), the next ancestor
+/// names in `where` in front of it, else a number after it.
+fn free_name(arena: std.mem.Allocator, names: *TypeNames, where: []const u8, preferred: []const u8) Error![]const u8 {
+    if (!names.contains(preferred)) return preferred;
+
+    var candidate = preferred;
+    var rest = where;
+
+    while (std.mem.lastIndexOfScalar(u8, rest, '.')) |dot| {
+        rest = rest[0..dot];
+        const segment = rest[if (std.mem.lastIndexOfScalar(u8, rest, '.')) |inner| inner + 1 else 0..];
+        candidate = try std.fmt.allocPrint(arena, "{s}{s}", .{ try capitalize(arena, segment), candidate });
+        if (!names.contains(candidate)) return candidate;
+    }
+
+    var number: u32 = 2;
+
+    while (number < 1000) : (number += 1) {
+        const numbered = try std.fmt.allocPrint(arena, "{s}{d}", .{ preferred, number });
+        if (!names.contains(numbered)) return numbered;
+    }
+
+    return err.fail("{s}: no free type name for {s}", .{ where, preferred });
+}
+
 fn item_struct_name(arena: std.mem.Allocator, names: *TypeNames, where: []const u8, name: []const u8) Error![]const u8 {
     const plain = try std.fmt.allocPrint(arena, "{s}Item", .{try capitalize(arena, name)});
     const taken = names.contains(plain);
     const parent = where[if (std.mem.lastIndexOfScalar(u8, where, '.')) |dot| dot + 1 else 0..];
-    const chosen = if (!taken)
+    const preferred = if (!taken)
         plain
     else
         try std.fmt.allocPrint(arena, "{s}{s}", .{ try capitalize(arena, parent), plain });
+    const chosen = try free_name(arena, names, where, preferred);
 
-    if (names.contains(chosen)) return err.fail("{s}.{s}: item type name {s} is taken twice", .{ where, name, chosen });
     try names.put(arena, chosen, {});
     return chosen;
 }
@@ -653,12 +772,12 @@ fn adapt_props(
             else
                 try capitalize(arena, name);
             // A name the module already declares (an import) takes `Value` after it.
-            const enum_name = if (names.contains(plain_name))
+            const preferred = if (names.contains(plain_name))
                 try std.fmt.allocPrint(arena, "{s}Value", .{plain_name})
             else
                 plain_name;
+            const enum_name = try free_name(arena, names, where, preferred);
 
-            if (names.contains(enum_name)) return err.fail("{s}.{s}: enum type name {s} is taken twice", .{ where, name, enum_name });
             try names.put(arena, enum_name, {});
             var tags: std.ArrayList([]const u8) = .empty;
 
@@ -857,6 +976,7 @@ fn type_code(t: Type) []const u8 {
         .strings => "[]const []const u8",
         .opt_strings => "?[]const []const u8",
         .action => "?[]const u8",
+        .value => "rt.Value",
         .array, .item, .enumeration, .opt_enumeration, .null, .action_name, .finite_map, .finite, .state_root, .ref_name, .union_value, .union_typeof => unreachable,
     };
 }
@@ -869,7 +989,53 @@ fn capitalize(arena: std.mem.Allocator, name: []const u8) ![]const u8 {
     return out;
 }
 
+test {
+    std.testing.refAllDecls(expression_js);
+    std.testing.refAllDecls(slots_file);
+}
+
 /// `text` as a Zig string literal, quotes included.
+/// Whether generated `code` reads nothing of the instance it renders in: no prop but the
+/// page's request and its family's state, and none of `locals`, the names declared around
+/// it.
+fn instance_free(code: []const u8, locals: []const Local) bool {
+    var at: usize = 0;
+
+    while (std.mem.indexOfPos(u8, code, at, "props.")) |found| {
+        at = found + "props.".len;
+        if (found > 0 and is_identifier_char(code[found - 1])) continue;
+        // The page's request is one per page. A family's state reaches a prototype's
+        // components only as `publr_prototype`, which leaves its values out.
+        if (std.mem.startsWith(u8, code[at..], "publr_request")) continue;
+        if (std.mem.startsWith(u8, code[at..], "publr_family")) continue;
+        return false;
+    }
+
+    for (locals) |local| {
+        if (mentions(code, local.name)) return false;
+    }
+
+    return true;
+}
+
+/// Whether `code` has `name` as a whole identifier.
+fn mentions(code: []const u8, name: []const u8) bool {
+    var at: usize = 0;
+
+    while (std.mem.indexOfPos(u8, code, at, name)) |found| {
+        at = found + name.len;
+        const before_ok = found == 0 or !is_identifier_char(code[found - 1]);
+        const after_ok = at >= code.len or !is_identifier_char(code[at]);
+        if (before_ok and after_ok) return true;
+    }
+
+    return false;
+}
+
+fn is_identifier_char(char: u8) bool {
+    return std.ascii.isAlphanumeric(char) or char == '_' or char == '@';
+}
+
 fn zig_string(arena: std.mem.Allocator, text: []const u8) ![]const u8 {
     var out: std.Io.Writer.Allocating = .init(arena);
     const w = &out.writer;
@@ -959,7 +1125,9 @@ const Generator = struct {
     /// (`import { state, toggle } from "./Dialog.ptsx"`): part modules wire
     /// to the family's store through DOM ancestry, so their bindings are
     /// *foreign* — wires without SSR initial values.
-    foreign: ?Foreign,
+    /// The families this module is a part of: each one it imports state, actions or refs
+    /// from.
+    foreigns: []const Foreign,
     /// Set while the module's root element is being opened, so it can carry
     /// the `data-p-store` attribute and the `data-p` seed.
     root_store: ?[]const u8,
@@ -967,6 +1135,29 @@ const Generator = struct {
     /// True while the module's root node renders: the root element (or each
     /// arm of a conditional root) receives the show/text transport plumbing.
     at_root: bool,
+    /// The module's compiled expressions. One expression asked for twice in the
+    /// same scope names one slot; a list's prototype and its server rows differ.
+    slots: std.ArrayList(slots_file.Slot) = .empty,
+    /// `Program.expressions_field`.
+    expressions_field: []const u8 = "",
+    /// `Program.classes_field`.
+    classes_field: []const u8 = "",
+    /// `Program.templates_field`.
+    templates_field: []const u8 = "",
+    /// The variable holding this render's state as JSON, where it is declared, and
+    /// whether an expression read it.
+    state_json: ?[]const u8 = null,
+    state_offset: usize = 0,
+    state_fields: []const u8 = "",
+    state_json_used: bool = false,
+    /// The Zig expression for the family roots this render is inside: the caller's, a
+    /// family root's own once it declares it, a block's as it is rendered.
+    family_code: []const u8 = "props.publr_family",
+    /// A family root's store, kept for its render instance once the root element took it.
+    family_store: ?[]const u8 = null,
+    /// Above zero while a list's subject lowers: its rows are typed in the render,
+    /// which an engine's value is not (yet).
+    native_depth: u32 = 0,
 
     const Foreign = struct {
         module_name: []const u8,
@@ -994,7 +1185,7 @@ const Generator = struct {
             .counter = 0,
             .arena_used = false,
             .props_used = false,
-            .foreign = null,
+            .foreigns = &.{},
             .root_store = null,
             .root_seeds = &.{},
             .at_root = false,
@@ -1008,10 +1199,7 @@ const Generator = struct {
     /// Classifies every import from a sibling family module against that
     /// family's exported state/action/ref names.
     fn resolve_foreign(gen: *Generator) Error!void {
-        var state_local: ?[]const u8 = null;
-        var actions: std.ArrayList(NamePair) = .empty;
-        var refs: std.ArrayList(NamePair) = .empty;
-        var family_module: ?[]const u8 = null;
+        var foreigns: std.ArrayList(Foreign) = .empty;
 
         for (gen.module.imports) |import| {
             const target = for (gen.modules) |candidate| {
@@ -1031,33 +1219,46 @@ const Generator = struct {
 
             if (!is_state and !is_action and !is_ref) continue;
 
-            if (family_module) |known| {
-                if (!std.mem.eql(u8, known, import.module)) {
-                    return gen.fail("two family stores are imported ({s} and {s}); one is lowered", .{ known, import.module });
-                }
-            } else {
-                family_module = import.module;
-            }
-
-            if (is_state) state_local = import.local;
-            if (is_action) try actions.append(gen.arena, .{
-                .local = import.local,
-                .name = import.imported,
-            });
-            if (is_ref) try refs.append(gen.arena, .{
-                .local = import.local,
-                .name = import.imported,
-            });
-        }
-
-        if (family_module) |name| {
-            gen.foreign = .{
-                .module_name = name,
-                .state_local = state_local,
-                .actions = actions.items,
-                .refs = refs.items,
+            // One entry per family, however many names come from it.
+            const foreign = for (foreigns.items) |*known| {
+                if (std.mem.eql(u8, known.module_name, import.module)) break known;
+            } else blk: {
+                try foreigns.append(gen.arena, .{
+                    .module_name = import.module,
+                    .state_local = null,
+                    .actions = &.{},
+                    .refs = &.{},
+                });
+                break :blk &foreigns.items[foreigns.items.len - 1];
             };
+
+            if (is_state) foreign.state_local = import.local;
+            if (is_action) foreign.actions = try append_pair(gen.arena, foreign.actions, .{
+                .local = import.local,
+                .name = import.imported,
+            });
+            if (is_ref) foreign.refs = try append_pair(gen.arena, foreign.refs, .{
+                .local = import.local,
+                .name = import.imported,
+            });
         }
+
+        gen.foreigns = foreigns.items;
+    }
+
+    fn append_pair(arena: std.mem.Allocator, pairs: []const NamePair, pair: NamePair) Error![]const NamePair {
+        const grown = try arena.alloc(NamePair, pairs.len + 1);
+        @memcpy(grown[0..pairs.len], pairs);
+        grown[pairs.len] = pair;
+        return grown;
+    }
+
+    /// The family whose state this module imports under `name`.
+    fn foreign_of_state(gen: *const Generator, name: []const u8) ?Foreign {
+        for (gen.foreigns) |foreign| {
+            if (foreign.state_local) |state| if (std.mem.eql(u8, state, name)) return foreign;
+        }
+        return null;
     }
 
     fn lower_module(gen: *Generator) Error![]const u8 {
@@ -1080,6 +1281,7 @@ const Generator = struct {
             }
         }
 
+        try gen.write_state_json();
         for (gen.module.bindings) |binding| {
             // Event callbacks execute in the client companion, not during SSR.
             if (binding.value.* == .function) continue;
@@ -1127,6 +1329,12 @@ const Generator = struct {
             \\    // The request a server render reads as `Publr.request`, handed down
             \\    // through every component call.
             \\    publr_request: ?*const anyopaque = null,
+            \\    // Rendered as a template's prototype, before any row: props the row
+            \\    // fills hold placeholders, so classes drawn from them are left out.
+            \\    publr_prototype: bool = false,
+            \\    // The family roots this component renders inside, whose state their
+            \\    // parts read on the server; handed down through every component call.
+            \\    publr_family: ?*const rt.Family = null,
             \\
         );
         for (gen.module.props) |prop| {
@@ -1147,7 +1355,14 @@ const Generator = struct {
             try w.writeAll("    _ = props;\n");
         }
 
-        try w.writeAll(gen.body.written());
+        if (gen.state_json_used) {
+            gen.arena_used = true;
+            try w.writeAll(gen.body.written()[0..gen.state_offset]);
+            try w.writeAll(try gen.instance_declaration());
+            try w.writeAll(gen.body.written()[gen.state_offset..]);
+        } else {
+            try w.writeAll(gen.body.written());
+        }
         try w.writeAll("}\n");
         try w.writeAll(gen.blocks.written());
 
@@ -1257,6 +1472,20 @@ const Generator = struct {
     /// The seed expression behind an own-state wire (`state.value` on the
     /// family root, where `state.value = value ?? defaultValue` seeds it):
     /// the SSR initial the attribute renders while the wire hydrates.
+    /// The initial value of the own state field `e` reads, when no prop seeds it.
+    fn unseeded_initial(gen: *Generator, e: *const ExpressionIR) ?*const ExpressionIR {
+        const wire = gen.module.wire orelse return null;
+        const path = gen.wire_state_path(e) orelse return null;
+        if (std.mem.indexOfScalar(u8, path.spec, '.') != null) return null;
+        for (wire.seed_exprs) |seed| {
+            if (std.mem.eql(u8, seed.field, path.spec)) return null;
+        }
+        for (wire.initials) |initial| {
+            if (std.mem.eql(u8, initial.field, path.spec)) return initial.expr;
+        }
+        return null;
+    }
+
     fn seed_lowered(gen: *Generator, e: *const ExpressionIR) Error!?Lowered {
         const wire = gen.module.wire orelse return null;
         const path = gen.wire_state_path(e) orelse return null;
@@ -1269,17 +1498,95 @@ const Generator = struct {
         return null;
     }
 
-    /// A branch of a conditional over own state: its own initial when it reads own state
-    /// too (`state.on ? `${state.size}px` : ""`), the plain expression otherwise; null
-    /// when it reads state the server cannot serve.
-    fn initial_or_expression(gen: *Generator, e: *const ExpressionIR) Error!?Lowered {
-        if (try gen.own_initial(e)) |initial| {
-            return switch (initial) {
-                .unservable => null,
-                .lowered => |lowered| lowered,
-            };
+    /// A list's rows as the render holds them: a state field's seed or initial, or,
+    /// for a list a computation makes from one (`state.items.filter(…)`), the
+    /// engine's answer read into the rows of the list it starts from.
+    fn list_rows(gen: *Generator, e: *const ExpressionIR) Error!?Lowered {
+        if (try gen.foreign_rows(e)) |rows| return rows;
+        if (try gen.native_initial(e)) |initial| {
+            if (initial == .lowered) return initial.lowered;
         }
-        return try gen.expression(e);
+        if (gen.expressions_field.len == 0) return null;
+        const base = array_base(e) orelse return null;
+        const rows: Lowered = if (gen.wire_state_path(base) != null) blk: {
+            const initial = (try gen.native_initial(base)) orelse return null;
+            if (initial == .unservable) return null;
+            break :blk initial.lowered;
+        } else gen.attempt_native(base) catch return null;
+        if (rows.type != .array and rows.type != .strings) return null;
+        const value = switch (try gen.server_value(e)) {
+            .lowered => |lowered| lowered,
+            .unservable => return null,
+        };
+        gen.arena_used = true;
+        return .{
+            .code = try std.fmt.allocPrint(gen.arena, "(try rt.value_into(@TypeOf({s}), arena, {s}))", .{ rows.code, value.code }),
+            .type = rows.type,
+        };
+    }
+
+    /// Whether a part's reads of its family's state have a first value in the render:
+    /// the engine runs them over the nearest root's state.
+    fn family_served(gen: *const Generator) bool {
+        return gen.expressions_field.len > 0;
+    }
+
+    /// A list of a family's state read from a part (`state.items`, or a computation
+    /// from it): the engine's answer read into rows of the type of the root's prop
+    /// that seeds the field. Null when the field is not seeded by a list prop.
+    fn foreign_rows(gen: *Generator, e: *const ExpressionIR) Error!?Lowered {
+        if (!gen.family_served() or gen.foreigns.len == 0) return null;
+        // The field itself, or the field a computation keeps rows of.
+        const base = array_base(e) orelse e;
+        const path = gen.wire_state_path(base) orelse return null;
+        if (!path.foreign or path.spec.len == 0 or std.mem.indexOfScalar(u8, path.spec, '.') != null) return null;
+        const foreign = gen.foreign_of_state(state_root_name(base) orelse return null) orelse return null;
+        const family = for (gen.modules) |candidate| {
+            if (std.mem.eql(u8, candidate.file_stem, foreign.module_name) or std.mem.eql(u8, candidate.name, foreign.module_name)) break candidate;
+        } else return null;
+        const wire = family.wire orelse return null;
+        const seed = for (wire.seed_exprs) |candidate| {
+            if (std.mem.eql(u8, candidate.field, path.spec)) break candidate;
+        } else return null;
+        if (seed.expr.* != .reference or seed.expr.reference.source != .prop) return null;
+        const prop = find_field(family.props, seed.expr.reference.name) orelse return null;
+        if (prop.type != .array and prop.type != .strings) return null;
+        const value = switch (try gen.server_value(e)) {
+            .lowered => |lowered| lowered,
+            .unservable => return null,
+        };
+        var imported = false;
+        for (gen.imports_used.items) |used| {
+            if (std.mem.eql(u8, used, family.name)) imported = true;
+        }
+        if (!imported) try gen.imports_used.append(gen.arena, family.name);
+        gen.arena_used = true;
+        return .{
+            // A prototype (a part drawn inside a caller's template) has no rows.
+            .code = try std.fmt.allocPrint(gen.arena, "(if (props.publr_prototype) @as(@FieldType({s}.Props, \"{s}\"), &.{{}}) else try rt.value_into(@FieldType({s}.Props, \"{s}\"), arena, {s}))", .{ family.name, prop.name, family.name, prop.name, value.code }),
+            .type = prop.type,
+        };
+    }
+
+    /// `native_expression`, leaving nothing behind when it fails.
+    fn attempt_native(gen: *Generator, e: *const ExpressionIR) Error!Lowered {
+        gen.native_depth += 1;
+        defer gen.native_depth -= 1;
+        return gen.attempt(e);
+    }
+
+    /// `expression` lowered in the render alone, for a list's subject.
+    fn native_expression(gen: *Generator, e: *const ExpressionIR) Error!Lowered {
+        gen.native_depth += 1;
+        defer gen.native_depth -= 1;
+        return gen.expression(e);
+    }
+
+    /// `own_initial` lowered in the render alone, for a list's subject.
+    fn native_initial(gen: *Generator, e: *const ExpressionIR) Error!?OwnInitial {
+        gen.native_depth += 1;
+        defer gen.native_depth -= 1;
+        return gen.own_initial(e);
     }
 
     /// The SSR value behind an own-state wire: the seed expression when the
@@ -1287,73 +1594,31 @@ const Generator = struct {
     /// getters and other fields the IR could not carry (the wire then
     /// hydrates without an SSR value, exactly as a foreign binding does).
     fn own_initial(gen: *Generator, e: *const ExpressionIR) Error!?OwnInitial {
-        if (e.* == .member and e.member.property == .string and std.mem.eql(u8, e.member.property.string, "length")) {
-            if (try gen.own_initial(e.member.object)) |initial| {
-                if (initial == .lowered and (initial.lowered.type == .array or initial.lowered.type == .strings)) {
-                    return .{
-                        .lowered = .{
-                            .code = try std.fmt.allocPrint(gen.arena, "@as(f64, @floatFromInt({s}.len))", .{initial.lowered.code}),
-                            .type = .number,
-                        },
-                    };
-                }
-            }
-        }
-        if (gen.wire_state_path(e)) |path| {
+        const path = gen.wire_state_path(e);
+        // A family's state read from a part: the engine runs it over the root's state.
+        if (path) |wired| if (wired.foreign) {
+            if (!wired.own or gen.native_depth > 0) return .unservable;
+            return try gen.server_value(e);
+        };
+        if (path) |wired| {
             for (gen.wire_aliases.items) |alias| {
-                if (!path.own or !std.mem.startsWith(u8, path.spec, alias)) continue;
-                if (path.spec.len == alias.len or path.spec[alias.len] == '.') {
+                if (!wired.own or !std.mem.startsWith(u8, wired.spec, alias)) continue;
+                if (wired.spec.len == alias.len or wired.spec[alias.len] == '.') {
                     return .{
                         .lowered = try gen.expression(e),
                     };
                 }
             }
         }
-        // A template over own state: its parts' initials, formatted.
-        if (e.* == .template and try gen.wire_spec(e) != null) {
-            return if (try gen.template_with(e, true)) |lowered| .{
-                .lowered = lowered,
-            } else .unservable;
-        }
-        if (e.* == .conditional) {
-            if (try gen.own_initial(e.conditional.@"test")) |test_value| {
-                if (test_value == .unservable) return .unservable;
-                const consequent = (try gen.initial_or_expression(e.conditional.consequent)) orelse return .unservable;
-                const alternate = (try gen.initial_or_expression(e.conditional.alternate)) orelse return .unservable;
-                return .{
-                    .lowered = try gen.select(try gen.truthy(test_value.lowered), consequent, alternate),
-                };
-            }
-        }
-        // `!state.x` inverts its field's initial.
-        if (e.* == .unary and std.mem.eql(u8, e.unary.operator, "!")) {
-            const inner = (try gen.own_initial(e.unary.argument)) orelse return null;
-            return switch (inner) {
-                .unservable => .unservable,
-                .lowered => |lowered| .{
-                    .lowered = .{
-                        .code = try std.fmt.allocPrint(gen.arena, "!{s}", .{try gen.truthy(lowered)}),
-                        .type = .boolean,
-                    },
-                },
-            };
-        }
-
-        if (e.* == .operation) {
-            const left_initial = try gen.own_initial(e.operation.left);
-            const right_initial = try gen.own_initial(e.operation.right);
-            if (left_initial != null or right_initial != null) {
-                if ((left_initial != null and left_initial.? == .unservable) or (right_initial != null and right_initial.? == .unservable)) return .unservable;
-                // A side that is a wire with no value here (a list row's alias in its
-                // prototype) leaves the whole comparison to the runtime.
-                if (left_initial == null and gen.wire_state_path(e.operation.left) != null) return .unservable;
-                if (right_initial == null and gen.wire_state_path(e.operation.right) != null) return .unservable;
-                const left = if (left_initial) |initial| initial.lowered else try gen.expression(e.operation.left);
-                const right = if (right_initial) |initial| initial.lowered else try gen.expression(e.operation.right);
-                return .{
-                    .lowered = try gen.operation_values(e, left, right),
-                };
-            }
+        // Anything but a field of the state itself is the engine's: a computation,
+        // or a path into a field (`state.items.length`).
+        const field = if (path) |wired| std.mem.indexOfScalar(u8, wired.spec, '.') == null else false;
+        if (!field) {
+            const call = (try gen.slot_call_for(e, .peek)) orelse return null;
+            if (!call.live) return null;
+            // Without an engine the render has no first value for it.
+            if (gen.expressions_field.len == 0 or gen.native_depth > 0) return if (call.own) .unservable else null;
+            return try gen.server_value(e);
         }
         if (try gen.seed_lowered(e)) |lowered| {
             return .{
@@ -1361,10 +1626,8 @@ const Generator = struct {
             };
         }
         const wire = gen.module.wire orelse return null;
-        const path = gen.wire_state_path(e) orelse return null;
-        if (std.mem.indexOfScalar(u8, path.spec, '.') != null) return null;
         for (wire.initials) |initial| {
-            if (!std.mem.eql(u8, initial.field, path.spec)) continue;
+            if (!std.mem.eql(u8, initial.field, path.?.spec)) continue;
             const expr = initial.expr orelse return .unservable;
             return .{
                 .lowered = try gen.expression(expr),
@@ -1397,6 +1660,7 @@ const Generator = struct {
                 });
             },
             .string, .number, .enumeration => try gen.value_attribute(name, lowered),
+            .value => try gen.line("try rt.write_value_attribute({s}, \"{s}\", {s});", .{ gen.writer_name, name, lowered.code }),
             else => return gen.fail("an SSR attribute \"{s}\" of type {s} is not lowered", .{ name, @tagName(lowered.type) }),
         }
     }
@@ -1413,6 +1677,7 @@ const Generator = struct {
         var directives: std.ArrayList([]const u8) = .empty;
         var paired: std.ArrayList(PlainAttrIR) = .empty;
         var own_ssr: std.ArrayList(SsrAttr) = .empty;
+        var style_object: ?*const ExpressionIR = null;
 
         const attrs = n.attributes;
 
@@ -1503,12 +1768,22 @@ const Generator = struct {
                         continue;
                     }
 
-                    // A style object with literal values is a static style text
-                    // (camelCase keys kebab-cased, `--custom` kept).
+                    // A style object: literal values are a static style text
+                    // (camelCase keys kebab-cased, `--custom` kept); values from
+                    // props are written by the render; one over state is bound.
+                    // Written after the tag opens, with the other attributes.
                     if (std.mem.eql(u8, name, "style") and form == .expression and value.* == .object) {
-                        try gen.static(" style=\"");
-                        try gen.static_style_object(value);
-                        try gen.static("\"");
+                        style_object = value;
+                        if (!style_is_literal(value)) {
+                            if (try gen.live_style(value)) |text| {
+                                if (try gen.slot_static(text)) |wired| {
+                                    try bindings.append(gen.arena, .{
+                                        .name = "style",
+                                        .wire = wired.spec,
+                                    });
+                                }
+                            }
+                        }
                         continue;
                     }
 
@@ -1671,9 +1946,15 @@ const Generator = struct {
         // Class layers derived from wired props: a group per layer, composed
         // at render time.
         var prop_classes: std.ArrayList([]const u8) = .empty;
-        for (class_attrs.items) |a| {
+        // Per layer computed from wired props, the wire that fills it in the
+        // browser; null for a layer drawn here alone (a bare string prop's
+        // placeholder is already empty).
+        const class_wires = try gen.arena.alloc(?[]const u8, class_attrs.items.len);
+        @memset(class_wires, null);
+        for (class_attrs.items, class_wires) |a, *layer_wire| {
             if (a.form != .expression) continue;
             if (try gen.prop_wire(a.value, .classes)) |wire| {
+                layer_wire.* = wire;
                 try prop_classes.append(gen.arena, wire);
             } else if (try gen.prop_wire(a.value, .value)) |wire| {
                 // A class list the caller wires (a `classes` prop): the
@@ -1735,6 +2016,7 @@ const Generator = struct {
                         .number => try gen.line("try rt.write_number({s}, {s});", .{ gen.writer_name, lowered.code }),
                         .null => try gen.static("null"),
                         .array, .item, .strings => try gen.line("try rt.write_seed_value({s}, arena, {s});", .{ gen.writer_name, lowered.code }),
+                        .value => try gen.line("try rt.write_seed_from_value({s}, {s});", .{ gen.writer_name, lowered.code }),
                         else => return gen.fail("a family seed of type {s} is not lowered", .{@tagName(lowered.type)}),
                     }
                     if (optional) {
@@ -1780,6 +2062,20 @@ const Generator = struct {
             try gen.static(text);
         }
 
+        if (style_object) |value| {
+            if (style_is_literal(value)) {
+                try gen.static(" style=\"");
+                try gen.static_style_object(value);
+                try gen.static("\"");
+            } else if (try gen.live_style(value)) |text| {
+                if (try gen.own_initial(text)) |initial| {
+                    if (initial == .lowered) try gen.ssr_attribute("style", initial.lowered);
+                }
+            } else {
+                try gen.dynamic_style(value);
+            }
+        }
+
         for (own_ssr.items) |attr| {
             try gen.ssr_attribute(attr.name, attr.lowered);
         }
@@ -1797,10 +2093,15 @@ const Generator = struct {
             }
         }
 
-        if (class_attrs.items.len == 1) {
-            try gen.attribute(class_attrs.items[0], null);
-        } else if (class_attrs.items.len > 1) {
-            try gen.merged_classes(class_attrs.items);
+        const any_wired = for (class_wires) |wire| {
+            if (wire != null) break true;
+        } else false;
+        if (any_wired) {
+            try gen.merged_classes(class_attrs.items, class_wires);
+        } else if (class_attrs.items.len > 0) {
+            // Every class goes through the consumer's merge, which writes it as the page
+            // sends it (short names, with the consumer's class book).
+            try gen.merged_classes(class_attrs.items, null);
         }
 
         if (events.items.len > 0) {
@@ -2052,29 +2353,32 @@ const Generator = struct {
     fn class_initial(gen: *Generator, e: *const ExpressionIR) Error!Lowered {
         if (try gen.class_wire_group(e)) |group| {
             if (group.own) {
-                const initial = (try gen.own_initial(e.conditional.@"test")) orelse return gen.fail("no SSR initial for a reactive class", .{});
-                if (initial == .unservable) return .{
+                const whole = (try gen.own_initial(e)) orelse return gen.fail("no SSR initial for a reactive class", .{});
+                if (whole == .unservable) return .{
                     .code = "\"\"",
                     .type = .string,
                 };
-                return .{
-                    .code = try std.fmt.allocPrint(gen.arena, "(if ({s}) {s} else {s})", .{
-                        try gen.truthy(initial.lowered),
-                        (try gen.expression(e.conditional.consequent)).code,
-                        (try gen.expression(e.conditional.alternate)).code,
-                    }),
-                    .type = .string,
-                };
+                if (whole.lowered.type == .value) {
+                    gen.arena_used = true;
+                    return .{
+                        .code = try std.fmt.allocPrint(gen.arena, "(try rt.value_classes(arena, {s}))", .{whole.lowered.code}),
+                        .type = .string,
+                    };
+                }
+                return whole.lowered;
             }
         }
         return gen.expression(e);
     }
 
     /// The inner ` p1, p2,` text of a `&.{ … }` class-part slice.
-    fn class_parts(gen: *Generator, attrs: []const PlainAttrIR) Error![]const u8 {
+    /// The class stack's parts as Zig values. A layer with a wire (`wires`, by
+    /// layer) is left empty in a template's prototype: its value there is a
+    /// placeholder, and the browser draws the row's.
+    fn class_parts(gen: *Generator, attrs: []const PlainAttrIR, wires: ?[]const ?[]const u8) Error![]const u8 {
         var parts: std.Io.Writer.Allocating = .init(gen.arena);
 
-        for (attrs) |a| {
+        for (attrs, 0..) |a, index| {
             if (a.form == .literal) {
                 try parts.writer.print(" {s},", .{try zig_string(gen.arena, try gen.literal_text(a.value))});
                 continue;
@@ -2086,10 +2390,22 @@ const Generator = struct {
                 lowered = try gen.materialize_finite(lowered.type.finite);
             }
 
-            switch (lowered.type) {
-                .string => try parts.writer.print(" {s},", .{lowered.code}),
-                .opt_string => try parts.writer.print(" ({s} orelse \"\"),", .{lowered.code}),
+            const part = switch (lowered.type) {
+                .string => lowered.code,
+                .opt_string => try std.fmt.allocPrint(gen.arena, "({s} orelse \"\")", .{lowered.code}),
+                .value => value: {
+                    gen.arena_used = true;
+                    break :value try std.fmt.allocPrint(gen.arena, "(try rt.value_classes(arena, {s}))", .{lowered.code});
+                },
                 else => return gen.fail("a class stack part is a {s}, which is not lowered", .{@tagName(lowered.type)}),
+            };
+            const wire = if (wires) |by_layer| by_layer[index] else null;
+
+            if (wire) |code| {
+                gen.props_used = true;
+                try parts.writer.print(" (if (props.publr_prototype and ({s}) != null) @as([]const u8, \"\") else {s}),", .{ code, part });
+            } else {
+                try parts.writer.print(" {s},", .{part});
             }
         }
 
@@ -2099,12 +2415,25 @@ const Generator = struct {
     /// A stack of `class` attributes merges into one attribute through the
     /// consumer's class-merge implementation: a later conflicting utility
     /// wins, as in the DOM runtime.
-    fn merged_classes(gen: *Generator, attrs: []const PlainAttrIR) Error!void {
+    fn merged_classes(gen: *Generator, attrs: []const PlainAttrIR, wires: ?[]const ?[]const u8) Error!void {
         gen.arena_used = true;
-        const parts = try gen.class_parts(attrs);
+        const parts = try gen.class_parts(attrs, wires);
         try gen.static(" class=\"");
-        try gen.line("try rt.write_merged({s}, arena, &.{{{s} }});", .{ gen.writer_name, parts });
+        if (try gen.class_book_code()) |book| {
+            try gen.line("try rt.write_merged_in({s}, arena, {s}, &.{{{s} }});", .{ gen.writer_name, book, parts });
+        } else {
+            try gen.line("try rt.write_merged({s}, arena, &.{{{s} }});", .{ gen.writer_name, parts });
+        }
         try gen.static("\"");
+    }
+
+    /// The class book, from the request the render was handed; null when the program names
+    /// no field for it.
+    fn class_book_code(gen: *Generator) Error!?[]const u8 {
+        if (gen.classes_field.len == 0 or gen.request.len == 0) return null;
+        gen.request_used = true;
+        gen.props_used = true;
+        return try std.fmt.allocPrint(gen.arena, "(if (props.publr_request) |publr_request| @as(*const Request, @ptrCast(@alignCast(publr_request))).{s} else null)", .{gen.classes_field});
     }
 
     /// The raw text of a `zig_string` literal this generator produced (action
@@ -2146,6 +2475,52 @@ const Generator = struct {
             try out.writer.writeAll(text);
         }
         return out.written();
+    }
+
+    /// A style object over state as the `styleText(…)` call the browser and the
+    /// engine both run (its CSS text); null when it reads no state.
+    fn live_style(gen: *Generator, e: *const ExpressionIR) Error!?*const ExpressionIR {
+        const call = (try gen.slot_call_for(e, .peek)) orelse return null;
+        if (!call.live) return null;
+        const callee = try gen.arena.create(ExpressionIR);
+        callee.* = .{
+            .reference = .{
+                .name = "styleText",
+                .source = .global,
+            },
+        };
+        const arguments = try gen.arena.alloc(*const ExpressionIR, 1);
+        arguments[0] = e;
+        const text = try gen.arena.create(ExpressionIR);
+        text.* = .{
+            .call = .{
+                .callee = callee,
+                .arguments = arguments,
+            },
+        };
+        return text;
+    }
+
+    /// A style object whose values the render knows (props, the engine's for a
+    /// computation), written as `name:value` pairs, empty ones left out.
+    fn dynamic_style(gen: *Generator, e: *const ExpressionIR) Error!void {
+        var pairs: std.Io.Writer.Allocating = .init(gen.arena);
+        for (e.object.fields) |style_field| {
+            const lowered = try gen.expression(style_field.value);
+            const text: []const u8 = switch (lowered.type) {
+                .string => try std.fmt.allocPrint(gen.arena, "@as(?[]const u8, {s})", .{lowered.code}),
+                .opt_string => lowered.code,
+                .number => try std.fmt.allocPrint(gen.arena, "@as(?[]const u8, try rt.number_to_string(arena, {s}))", .{lowered.code}),
+                .opt_number => try std.fmt.allocPrint(gen.arena, "(if ({s}) |number| @as(?[]const u8, try rt.number_to_string(arena, number)) else null)", .{lowered.code}),
+                .enumeration => try std.fmt.allocPrint(gen.arena, "@as(?[]const u8, @tagName({s}))", .{lowered.code}),
+                .null => "@as(?[]const u8, null)",
+                .value => try gen.value_into(lowered.code, .opt_string),
+                else => return gen.fail("style map value \"{s}\" is a {s}, which is not lowered", .{ style_field.name, @tagName(lowered.type) }),
+            };
+            try pairs.writer.print(" .{{ {s}, {s} }},", .{ try zig_string(gen.arena, try style_name(gen.arena, style_field.name)), text });
+        }
+        gen.arena_used = true;
+        try gen.line("try rt.write_attr_cond({s}, \"style\", try rt.style_text(arena, &.{{{s} }}));", .{ gen.writer_name, pairs.written() });
     }
 
     fn static_style_object(gen: *Generator, e: *const ExpressionIR) Error!void {
@@ -2235,6 +2610,13 @@ const Generator = struct {
             },
             .string, .number, .enumeration => try gen.value_attribute(name, lowered),
             .null => {},
+            .value => if (std.mem.eql(u8, name, "class")) {
+                gen.arena_used = true;
+                try gen.value_attribute(name, .{
+                    .code = try std.fmt.allocPrint(gen.arena, "(try rt.value_classes(arena, {s}))", .{lowered.code}),
+                    .type = .string,
+                });
+            } else try gen.ssr_attribute(name, lowered),
             else => return gen.fail("attribute \"{s}\" has a value of type {s}, which is not lowered", .{
                 name,
                 @tagName(lowered.type),
@@ -2288,7 +2670,7 @@ const Generator = struct {
     /// A node written where it stands, handed the request this render holds.
     fn render_node(gen: *Generator, code: []const u8) Error!void {
         gen.props_used = true;
-        try gen.line("try {s}.render_with({s}, arena, props.publr_request);", .{ code, gen.writer_name });
+        try gen.line("try {s}.render_in({s}, arena, props.publr_request, {s});", .{ code, gen.writer_name, gen.family_code });
     }
 
     fn url_base_for(gen: *Generator, code: []const u8) Error!void {
@@ -2446,6 +2828,7 @@ const Generator = struct {
                             if (initial == .lowered) {
                                 const code = switch (initial.lowered.type) {
                                     .string, .opt_string => initial.lowered.code,
+                                    .value => try gen.value_into(initial.lowered.code, .opt_string),
                                     else => return gen.fail("a forwarded initial attribute must be a string", .{}),
                                 };
                                 try forwarded.writer.print(" .{{ .name = \"{s}\", .value = {s} }},", .{ attribute_name, code });
@@ -2599,6 +2982,8 @@ const Generator = struct {
         // Every call hands the request down, so any component may read it.
         gen.props_used = true;
         try fields.writer.writeAll(" .publr_request = props.publr_request,");
+        try fields.writer.writeAll(if (gen.template_depth > 0) " .publr_prototype = true," else " .publr_prototype = props.publr_prototype,");
+        try fields.writer.print(" .publr_family = {s},", .{gen.family_code});
 
         // A component-call root passes the transport through.
         if (gen.at_root) {
@@ -2650,6 +3035,8 @@ const Generator = struct {
 
                 var captured: std.Io.Writer.Allocating = .init(gen.arena);
                 try captured.writer.writeAll(" .props = &props,");
+                try captured.writer.print(" .publr_family = {s},", .{gen.family_code});
+                try gen.capture_state(&captured.writer);
                 for (gen.locals.items) |local| {
                     try captured.writer.print(" .{s} = &{s},", .{ local.name, local.name });
                 }
@@ -2792,6 +3179,8 @@ const Generator = struct {
 
             var captured: std.Io.Writer.Allocating = .init(gen.arena);
             try captured.writer.writeAll(" .props = &props,");
+            try captured.writer.print(" .publr_family = {s},", .{gen.family_code});
+            try gen.capture_state(&captured.writer);
             for (gen.locals.items) |local| {
                 try captured.writer.print(" .{s} = &{s},", .{ local.name, local.name });
             }
@@ -2826,18 +3215,30 @@ const Generator = struct {
         const saved_body = gen.body;
         const saved_indent = gen.indent;
         const saved_writer = gen.writer_name;
+        const saved_family = gen.family_code;
+        // Restored however the block ends: a lowering that is attempted and fails
+        // leaves the render it returns to as it was.
+        defer gen.family_code = saved_family;
         gen.body = .init(gen.arena);
         gen.indent = 0;
         gen.writer_name = "w";
+        gen.family_code = "publr_family";
 
         try gen.line("", .{});
         try gen.line("const {s} = struct {{", .{body_type});
         gen.indent += 1;
-        try gen.line("pub fn render(cap: anytype, w: *std.Io.Writer, arena: std.mem.Allocator) anyerror!void {{", .{});
+        try gen.line("pub fn render(cap: anytype, w: *std.Io.Writer, arena: std.mem.Allocator, publr_family_given: ?*const rt.Family) anyerror!void {{", .{});
         gen.indent += 1;
         try gen.line("_ = &arena;", .{});
         try gen.line("const props = cap.props.*;", .{});
         try gen.line("_ = &props;", .{});
+        // Rendered inside the family roots of whoever renders the node, else the caller's.
+        try gen.line("const publr_family: ?*const rt.Family = publr_family_given orelse cap.publr_family;", .{});
+        try gen.line("_ = &publr_family;", .{});
+        if (gen.state_json) |name| {
+            try gen.line("const {s} = cap.{s};", .{ name, name });
+            try gen.line("_ = &{s};", .{name});
+        }
 
         for (gen.locals.items) |local| {
             try gen.line("const {s} = cap.{s}.*;", .{ local.name, local.name });
@@ -2955,7 +3356,7 @@ const Generator = struct {
             }
 
             if (try gen.wire_spec(value)) |wired| {
-                if (wired.own) return gen.fail("an SSR value from this module's own reactive state is not lowered yet (\"{s}\")", .{attr_name});
+                if (wired.own and !wired.foreign) return gen.fail("an SSR value from this module's own reactive state is not lowered yet (\"{s}\")", .{attr_name});
                 if (std.mem.eql(u8, attr_name, "hidden")) {
                     show_field = try gen.invert_wire(wired.spec);
                 } else {
@@ -2992,7 +3393,7 @@ const Generator = struct {
                 group_size += 1;
                 if (member.form == .expression) {
                     if (try gen.wire_spec(member.value)) |wired| {
-                        if (wired.own) return gen.fail("an SSR value from this module's own reactive state is not lowered yet (\"{s}\")", .{attr_name});
+                        if (wired.own and !wired.foreign) return gen.fail("an SSR value from this module's own reactive state is not lowered yet (\"{s}\")", .{attr_name});
                         wired_member = wired.spec;
                         continue;
                     }
@@ -3019,12 +3420,15 @@ const Generator = struct {
             }
         }
 
-        if (class_attrs.items.len == 1 and class_attrs.items[0].form == .literal) {
-            try fields.writer.print(" .class = {s},", .{
-                try zig_string(gen.arena, try gen.literal_text(class_attrs.items[0].value)),
-            });
-        } else if (class_attrs.items.len > 0) {
-            try fields.writer.print(" .class = try rt.merge_classes(arena, &.{{{s} }}),", .{try gen.class_parts(class_attrs.items)});
+        // Every class goes through the consumer's merge, which writes it as the page sends it.
+        if (class_attrs.items.len > 0) {
+            gen.arena_used = true;
+            const parts = try gen.class_parts(class_attrs.items, null);
+            if (try gen.class_book_code()) |book| {
+                try fields.writer.print(" .class = try rt.merge_classes_in(arena, {s}, &.{{{s} }}),", .{ book, parts });
+            } else {
+                try fields.writer.print(" .class = try rt.merge_classes(arena, &.{{{s} }}),", .{parts});
+            }
         }
 
         if (slot_events.items.len > 0) {
@@ -3114,6 +3518,7 @@ const Generator = struct {
         const code = switch (lowered.type) {
             .string => lowered.code,
             .enumeration => try std.fmt.allocPrint(gen.arena, "@tagName({s})", .{lowered.code}),
+            .value => try gen.value_into(lowered.code, .string),
             else => return gen.fail("<Dynamic as> is a {s}, which is not lowered", .{@tagName(lowered.type)}),
         };
         const binding = try gen.fresh("tag");
@@ -3161,7 +3566,16 @@ const Generator = struct {
     /// these — re-lowered here instead of read as its string local. Null
     /// when the value is none of these; the caller lowers it as usual.
     fn enum_expression(gen: *Generator, value: *const ExpressionIR, target: Type) Error!?[]const u8 {
+        // A live value is the engine's; `coerce` picks its tag.
+        if (gen.expressions_field.len > 0 and gen.native_depth == 0 and gen.wire_state_path(value) == null) {
+            if (try gen.slot_call_for(value, .peek)) |call| if (call.live) return null;
+        }
         const enumeration = target.unwrapped().enumeration;
+        // A state field no prop seeds starts at its initial value: `"md" as Size` is the
+        // literal, checked against the enum like one written in place.
+        if (gen.unseeded_initial(value)) |initial| {
+            if (initial.* == .literal and initial.literal == .string) return try gen.coerce_literal(initial.literal.string, target);
+        }
         switch (value.*) {
             .literal => |literal| if (literal == .string) return try gen.coerce_literal(literal.string, target),
             .conditional => |c| {
@@ -3241,6 +3655,7 @@ const Generator = struct {
     }
 
     fn coerce(gen: *Generator, lowered: Lowered, target: Type) Error![]const u8 {
+        if (lowered.type == .value) return gen.value_into(lowered.code, target);
         if (lowered.type.unwrapped() == .enumeration and target.unwrapped() == .enumeration) {
             const source_enum = lowered.type.unwrapped().enumeration;
             const target_enum = target.unwrapped().enumeration;
@@ -3530,9 +3945,7 @@ const Generator = struct {
             gen.indent += 1;
             try gen.present_values.append(gen.arena, tested.code);
         }
-        gen.template_depth += 1;
-        try gen.branch_body(body);
-        gen.template_depth -= 1;
+        try gen.template_body(try gen.template_id(body), false, body);
         if (unwraps) {
             try gen.flush();
             gen.indent -= 1;
@@ -3613,7 +4026,8 @@ const Generator = struct {
         }
 
         if (try gen.wire_spec(call.callee.member.object)) |wired| {
-            const parameter = function.function.parameters[0];
+            const parameter_source = function.function.parameters[0];
+            const parameter = try gen.local_name(parameter_source);
             try gen.wire_aliases.append(gen.arena, parameter);
             defer _ = gen.wire_aliases.pop();
             // Inside a server-rendered row the anchor carries only its id: the
@@ -3643,22 +4057,30 @@ const Generator = struct {
             }
             try gen.static(">");
             if (!anchor_only) {
-                gen.template_depth += 1;
-                try gen.row_body(body);
-                gen.template_depth -= 1;
+                try gen.template_body(try gen.template_id(e), true, body);
             }
             try gen.static("</template>");
             if (wired.own and gen.template_depth == 0) {
-                if (try gen.own_initial(call.callee.member.object)) |initial| {
-                    if (initial == .lowered) try gen.seeded_rows(initial.lowered, function.function);
-                }
+                if (try gen.list_rows(call.callee.member.object)) |rows| try gen.seeded_rows(rows, function.function);
             }
             return;
         }
         if (gen.list_prop(call.callee.member.object)) |prop| {
             return gen.prop_list_loop(e, prop, function.function);
         }
-        const subject = try gen.expression(call.callee.member.object);
+        if (try gen.slot_call(call.callee.member.object)) |slot| {
+            if (slot.live and slot.arguments.len > 0) {
+                return gen.slot_list_loop(e, call.callee.member.object, function.function);
+            }
+        }
+        const subject_expr = call.callee.member.object;
+        const subject = if (gen.expressions_field.len > 0)
+            gen.attempt_native(subject_expr) catch |failure| switch (failure) {
+                error.Pjsx => (try gen.list_rows(subject_expr)) orelse return failure,
+                else => return failure,
+            }
+        else
+            try gen.native_expression(subject_expr);
         const item_type: Type = switch (subject.type) {
             .array => |fields| .{
                 .item = fields,
@@ -3666,12 +4088,14 @@ const Generator = struct {
             .strings => .string,
             else => return gen.fail("`.map` on a {s}, which is not a lowered array", .{@tagName(subject.type)}),
         };
-        const parameter = function.function.parameters[0];
+        const parameter_source = function.function.parameters[0];
+        const parameter = try gen.local_name(parameter_source);
 
         try gen.line("for ({s}) |{s}| {{", .{ subject.code, parameter });
         gen.indent += 1;
         try gen.locals.append(gen.arena, .{
             .name = parameter,
+            .source_name = parameter_source,
             .type = item_type,
         });
         try gen.child_expression(function.function.body);
@@ -3729,7 +4153,8 @@ const Generator = struct {
     /// caller's state (its prototype, then the rows the server draws, keyed as the runtime
     /// keeps them); handed in plain, the rows alone.
     fn prop_list_loop(gen: *Generator, e: *const ExpressionIR, prop: Field, function: anytype) Error!void {
-        const parameter = function.parameters[0];
+        const parameter_source = function.parameters[0];
+        const parameter = try gen.local_name(parameter_source);
         const capture = try gen.fresh("list_wire");
         const subject: Lowered = .{
             .code = try std.fmt.allocPrint(gen.arena, "props.{f}", .{std.zig.fmtId(prop.name)}),
@@ -3742,11 +4167,10 @@ const Generator = struct {
         // what a wire cannot say stays rows alone, as before.
         const reactive = try gen.trial(gen.indent + 1, struct {
             fn emit(inner: *Generator, args: anytype) Error!void {
-                try inner.reactive_rows(args.e, args.prop, args.function, args.capture, args.subject);
+                try inner.reactive_rows(args.e, args.function, args.capture, args.subject);
             }
         }.emit, .{
             .e = e,
-            .prop = prop,
             .function = function,
             .capture = capture,
             .subject = subject,
@@ -3769,6 +4193,7 @@ const Generator = struct {
         gen.indent += 1;
         try gen.locals.append(gen.arena, .{
             .name = parameter,
+            .source_name = parameter_source,
             .type = item_type,
         });
         try gen.child_expression(function.body);
@@ -3829,9 +4254,11 @@ const Generator = struct {
         return arm;
     }
 
-    fn reactive_rows(gen: *Generator, e: *const ExpressionIR, prop: Field, function: anytype, capture: []const u8, subject: Lowered) Error!void {
-        _ = prop;
-        const parameter = function.parameters[0];
+    /// The prototype of a live list bound by `capture` (the runtime's spec of its subject),
+    /// then the rows the server draws from `subject`; none when it has no first value.
+    fn reactive_rows(gen: *Generator, e: *const ExpressionIR, function: anytype, capture: []const u8, subject: ?Lowered) Error!void {
+        const parameter_source = function.parameters[0];
+        const parameter = try gen.local_name(parameter_source);
         const body = function.body;
         try gen.wire_aliases.append(gen.arena, parameter);
         defer _ = gen.wire_aliases.pop();
@@ -3854,12 +4281,67 @@ const Generator = struct {
             }
         }
         try gen.static(">");
-        gen.template_depth += 1;
-        try gen.row_body(body);
-        gen.template_depth -= 1;
+        try gen.template_body(try gen.template_id(e), true, body);
         try gen.static("</template>");
-        try gen.seeded_rows(subject, function);
+        if (subject) |rows| try gen.seeded_rows(rows, function);
         try gen.flush();
+    }
+
+    /// `state.items[key].map(...)`, a live list whose subject also reads props: bound by
+    /// its compiled expression called with their values (`$e_Group_3(name: "seo")`). The
+    /// browser draws its rows; the server has no first value for them.
+    fn slot_list_loop(gen: *Generator, e: *const ExpressionIR, subject: *const ExpressionIR, function: anytype) Error!void {
+        const spec = (try gen.slot_runtime(subject)) orelse return gen.fail("a live list's subject has no binding", .{});
+        const capture = try gen.fresh("list_wire");
+
+        try gen.flush();
+        try gen.line("const {s} = {s}.?;", .{ capture, spec });
+        try gen.reactive_rows(e, function, capture, null);
+    }
+
+    /// A template's prototype: written once per page when its code reads nothing of the
+    /// instance (no prop but the page's request, no local from around it), since a later
+    /// anchor of the same template finds it by id (the runtime keeps every prototype a page
+    /// registers). One that reads its instance is written each time; so is every one in a
+    /// render handed no set to keep the page's in.
+    fn template_body(gen: *Generator, id: []const u8, comptime row: bool, body: *const ExpressionIR) Error!void {
+        gen.template_depth += 1;
+        defer gen.template_depth -= 1;
+
+        const templates = (try gen.templates_code()) orelse {
+            if (row) try gen.row_body(body) else try gen.branch_body(body);
+            return;
+        };
+        const outer_locals = gen.locals.items.len;
+
+        try gen.flush();
+        const start = gen.body.written().len;
+        if (row) try gen.row_body(body) else try gen.branch_body(body);
+        try gen.flush();
+
+        const code = try gen.arena.dupe(u8, gen.body.written()[start..]);
+
+        if (!instance_free(code, gen.locals.items[0..outer_locals])) return;
+
+        gen.body.shrinkRetainingCapacity(start);
+        try gen.line("if (rt.first_template({s}, {s})) {{", .{ templates, try zig_string(gen.arena, id) });
+        var lines = std.mem.splitScalar(u8, code, '\n');
+        while (lines.next()) |code_line| {
+            if (code_line.len == 0) continue;
+            try gen.body.writer.writeAll("    ");
+            try gen.body.writer.writeAll(code_line);
+            try gen.body.writer.writeByte('\n');
+        }
+        try gen.line("}}", .{});
+    }
+
+    /// The page's set of templates written, from the request the render was handed; null
+    /// when the program names no field for it.
+    fn templates_code(gen: *Generator) Error!?[]const u8 {
+        if (gen.templates_field.len == 0 or gen.request.len == 0) return null;
+        gen.request_used = true;
+        gen.props_used = true;
+        return try std.fmt.allocPrint(gen.arena, "(if (props.publr_request) |publr_request| @as(*const Request, @ptrCast(@alignCast(publr_request))).{s} else null)", .{gen.templates_field});
     }
 
     fn template_id(gen: *Generator, expr: *const ExpressionIR) Error![]const u8 {
@@ -3890,9 +4372,7 @@ const Generator = struct {
         if (inverse) try gen.static(" data-p-if-not");
         try gen.static(">");
         if (!in_row) {
-            gen.template_depth += 1;
-            try gen.branch_body(body);
-            gen.template_depth -= 1;
+            try gen.template_body(try gen.template_id(body), false, body);
         }
         try gen.static("</template>");
         if (!wired.own or gen.template_depth > 0) return;
@@ -3918,14 +4398,27 @@ const Generator = struct {
     /// store would sit on the branch's anchor and the branch's content would not see the item.
     fn row_body(gen: *Generator, body: *const ExpressionIR) Error!void {
         const wrapper = body.* != .node;
-        if (wrapper) try gen.static("<span class=\"contents\">");
+        if (wrapper) try gen.contents_wrapper();
         try gen.child_expression(body);
         if (wrapper) try gen.static("</span>");
     }
 
+    /// The `<span class="contents">` a body that is not one element is wrapped in, its
+    /// class through the consumer's merge like every other.
+    fn contents_wrapper(gen: *Generator) Error!void {
+        gen.arena_used = true;
+        try gen.static("<span class=\"");
+        if (try gen.class_book_code()) |book| {
+            try gen.line("try rt.write_merged_in({s}, arena, {s}, &.{{ \"contents\", }});", .{ gen.writer_name, book });
+        } else {
+            try gen.line("try rt.write_merged({s}, arena, &.{{ \"contents\", }});", .{gen.writer_name});
+        }
+        try gen.static("\">");
+    }
+
     fn branch_body(gen: *Generator, body: *const ExpressionIR) Error!void {
         const wrapper = body.* != .node or body.node.node.* != .element;
-        if (wrapper) try gen.static("<span class=\"contents\">");
+        if (wrapper) try gen.contents_wrapper();
         try gen.child_expression(body);
         if (wrapper) try gen.static("</span>");
     }
@@ -3938,13 +4431,15 @@ const Generator = struct {
             .strings => .string,
             else => return gen.fail("a seeded list needs an array", .{}),
         };
-        const parameter = function.parameters[0];
+        const parameter_source = function.parameters[0];
+        const parameter = try gen.local_name(parameter_source);
         const index = try gen.fresh("row_index");
         try gen.line("for ({s}, 0..) |{s}, {s}| {{", .{ subject.code, parameter, index });
         gen.indent += 1;
         try gen.line("_ = &{s};", .{index});
         try gen.locals.append(gen.arena, .{
             .name = parameter,
+            .source_name = parameter_source,
             .type = item_type,
         });
         var key_code: []const u8 = index;
@@ -4006,25 +4501,564 @@ const Generator = struct {
             .boolean => try gen.line("try {s}.writeAll(if ({s}) \"true\" else \"false\");", .{ gen.writer_name, lowered.code }),
             .null => {},
             .enumeration => try gen.line("try {s}.writeAll(@tagName({s}));", .{ gen.writer_name, lowered.code }),
+            .value => try gen.line("try rt.write_value_text({s}, {s});", .{ gen.writer_name, lowered.code }),
             else => return gen.fail("a {s} cannot be written as text", .{@tagName(lowered.type)}),
         }
     }
 
-    // -- the wire translator ------------------------------------------------
+    // -- wires ----------------------------------------------------------------
     //
-    // JS expressions over reactive/family state translate to the PublrJS wire
-    // DSL (the retired ZSX chain's `reactiveWireSpec`): `state.open` →
-    // `$open`, `!state.open` → `not $open`,
-    // `state.values.includes(Publr.dataset("value"))` → `$values contains
-    // @value`, comparisons/`||`/ternary-with-literal-arms likewise. A part
-    // module's binding is *foreign* (the store lives on a DOM ancestor), so
-    // the wire is emitted without an SSR initial value; an own-module wire
-    // renders its seed or initial-state value alongside.
+    // What a binding names: a plain state or row path (`$open`, `$row.title`), its
+    // negation for `hidden` (`not $open`), or a compiled expression's slot. A part
+    // module's binding is *foreign* (the store lives on a DOM ancestor), so it has no
+    // first value; an own one renders its seed, its initial, or the engine's value.
 
     const Wired = struct {
         spec: []const u8,
         own: bool,
+        /// Reads the state of a family this module is a part of: the render has its
+        /// first value only through the nearest root of that family (`own` then).
+        foreign: bool = false,
     };
+
+    // -- compiled expressions -----------------------------------------------
+    //
+    // A live expression is a function the browser runs, in `stores.js`, named in
+    // the binding by its slot: `$e_Row_3`. The props and server loop locals it
+    // reads are its arguments, because only the render knows them:
+    // `$e_Badge_2(tone: $row.tone, size: "sm")`, each the caller's wire when it
+    // has one, else the value as JSON. State and module helpers it reads by
+    // closure, rows and imported state through its scope.
+
+    const SlotArgument = struct {
+        /// The name the function reads it under.
+        name: []const u8,
+        /// Zig code of its value at render time.
+        value: []const u8,
+        /// Zig code of the caller's wire for it, for a prop that can carry one.
+        wire: ?[]const u8,
+    };
+
+    const SlotCall = struct {
+        name: []const u8,
+        arguments: []const SlotArgument,
+        /// Reads state or a reactive row, so it is always bound; otherwise only
+        /// when a caller wired one of its props.
+        live: bool,
+        /// Reads the module's own state or seeded rows: the render has its first value.
+        own: bool,
+        /// Reads the state of a family this module is a part of.
+        foreign: bool = false,
+        /// What the server hands it as its scope, or null when the render holds no
+        /// value for something it reads (a family's state from a part, a row in a
+        /// list's prototype).
+        server_scope: ?[]const SlotArgument,
+    };
+
+    /// The expression's slot in the current scope; null when it reads nothing
+    /// live and no prop a caller could wire.
+    fn slot_call(gen: *Generator, e: *const ExpressionIR) Error!?SlotCall {
+        return gen.slot_call_for(e, .bound);
+    }
+
+    /// `slot_call`, or for `.run` the slot of any printable expression, live or not:
+    /// what the server runs for a first value.
+    fn slot_call_for(gen: *Generator, e: *const ExpressionIR, use: enum { bound, run, peek }) Error!?SlotCall {
+        if (!expression_js.printable(e)) return null;
+
+        var pending: std.ArrayList(expression_js.Reference) = .empty;
+        try pending.appendSlice(gen.arena, try expression_js.references(gen.arena, e));
+        var parameters: std.ArrayList([]const u8) = .empty;
+        var arguments: std.ArrayList(SlotArgument) = .empty;
+        var inlined: std.ArrayList(usize) = .empty;
+        var live = false;
+        var own = false;
+        var wirable = false;
+        var foreign_state: ?[]const u8 = null;
+        var server_scope: std.ArrayList(SlotArgument) = .empty;
+        var servable = true;
+
+        var index: usize = 0;
+        while (index < pending.items.len) : (index += 1) {
+            const read = pending.items[index];
+            const name = read.name;
+            switch (read.source) {
+                .state => {
+                    live = true;
+                    own = true;
+                },
+                .prop => {
+                    if (util.containsString(parameters.items, name)) continue;
+                    const field = find_field(gen.module.props, name) orelse return gen.fail("prop \"{s}\" is not declared", .{name});
+                    gen.props_used = true;
+                    try parameters.append(gen.arena, name);
+                    try arguments.append(gen.arena, .{
+                        .name = name,
+                        .value = try std.fmt.allocPrint(gen.arena, "props.{f}", .{std.zig.fmtId(name)}),
+                        .wire = if (field.bind_transport) try std.fmt.allocPrint(gen.arena, "props.publr_bind_{s}", .{name}) else null,
+                    });
+
+                    wirable = wirable or field.bind_transport;
+                },
+                .local, .global => {
+                    if (gen.is_alias(name)) {
+                        live = true;
+                        if (gen.server_local(name)) |zig_name| {
+                            own = true;
+                            if (!util.containsString(parameters.items, name)) try server_scope.append(gen.arena, .{
+                                .name = name,
+                                .value = zig_name,
+                                .wire = null,
+                            });
+                        } else servable = false;
+                        if (!util.containsString(parameters.items, name)) try parameters.append(gen.arena, name);
+                        continue;
+                    }
+                    if (gen.module.wire) |wire| {
+                        if (wire.state_name) |state| if (std.mem.eql(u8, state, name)) {
+                            live = true;
+                            own = true;
+                            continue;
+                        };
+                    }
+                    if (gen.foreign_of_state(name)) |foreign| {
+                        if (foreign.state_local) |state| if (std.mem.eql(u8, state, name)) {
+                            if (foreign_state) |known| if (!std.mem.eql(u8, known, name)) {
+                                return gen.fail("one expression reads the state of two families ({s} and {s})", .{ known, name });
+                            };
+                            live = true;
+                            own = own or gen.family_served();
+                            servable = servable and gen.family_served();
+                            foreign_state = name;
+                            if (!util.containsString(parameters.items, name)) {
+                                try parameters.append(gen.arena, name);
+                                // The server reads it from the nearest root of the family.
+                                gen.props_used = true;
+                                gen.arena_used = true;
+                                try server_scope.append(gen.arena, .{
+                                    .name = name,
+                                    .value = try std.fmt.allocPrint(gen.arena, "(try rt.family_state(arena, {s}, \"{s}\", {s}))", .{
+                                        gen.family_code,
+                                        try gen.foreign_store(foreign),
+                                        try zig_string(gen.arena, try gen.foreign_initial(foreign)),
+                                    }),
+                                    .wire = null,
+                                });
+                            }
+                            continue;
+                        };
+                    }
+                    const binding_index = for (gen.module.bindings, 0..) |binding, at| {
+                        if (std.mem.eql(u8, binding.name, name)) break at;
+                    } else null;
+                    if (binding_index) |at| {
+                        if (std.mem.indexOfScalar(usize, inlined.items, at) == null) {
+                            try inlined.append(gen.arena, at);
+                            try pending.appendSlice(gen.arena, try expression_js.references(gen.arena, gen.module.bindings[at].value));
+                        }
+                        continue;
+                    }
+                    if (gen.server_local(name)) |zig_name| {
+                        if (util.containsString(parameters.items, name)) continue;
+                        try parameters.append(gen.arena, name);
+                        try arguments.append(gen.arena, .{
+                            .name = name,
+                            .value = zig_name,
+                            .wire = null,
+                        });
+                        try server_scope.append(gen.arena, arguments.items[arguments.items.len - 1]);
+                        continue;
+                    }
+                    if (std.mem.eql(u8, name, "Publr") and reads_publr_stores(e)) live = true;
+                },
+            }
+        }
+
+        if (!live and !wirable and use != .run) return null;
+        // Asked only whether it is live: nothing is registered.
+        if (use == .peek) return .{
+            .name = "",
+            .arguments = arguments.items,
+            .live = live,
+            .own = own,
+            .foreign = foreign_state != null,
+            .server_scope = null,
+        };
+
+        std.mem.sort(usize, inlined.items, {}, std.sort.asc(usize));
+        var body: std.Io.Writer.Allocating = .init(gen.arena);
+        try body.writer.writeAll("(");
+        if (parameters.items.len > 0) {
+            try body.writer.writeAll("{ ");
+            for (parameters.items, 0..) |parameter, at| {
+                if (at > 0) try body.writer.writeAll(", ");
+                try body.writer.writeAll(parameter);
+            }
+            try body.writer.writeAll(" }");
+        }
+        try body.writer.writeAll(") => ");
+        const printed = try expression_js.print(gen.arena, e);
+        if (inlined.items.len == 0) {
+            try body.writer.writeAll(printed);
+        } else {
+            try body.writer.writeAll("{ ");
+            for (inlined.items) |at| {
+                const binding = gen.module.bindings[at];
+                try body.writer.print("const {s} = {s}; ", .{ binding.name, try expression_js.print(gen.arena, binding.value) });
+            }
+            try body.writer.print("return {s}; }}", .{printed});
+        }
+
+        const code = body.written();
+        for (gen.slots.items) |known| {
+            if (known.expression == e and std.mem.eql(u8, known.code, code)) {
+                return .{
+                    .name = known.name,
+                    .arguments = arguments.items,
+                    .live = live,
+                    .own = own,
+                    .foreign = foreign_state != null,
+                    .server_scope = if (servable) server_scope.items else null,
+                };
+            }
+        }
+        const name = try std.fmt.allocPrint(gen.arena, "e_{s}_{d}", .{ gen.module.name, gen.slots.items.len + 1 });
+        try gen.slots.append(gen.arena, .{
+            .name = name,
+            .code = code,
+            .expression = e,
+            .props = try gen.props_read(arguments.items),
+            .foreign = if (foreign_state) |local| .{
+                .local = local,
+                .store = try gen.foreign_store(gen.foreign_of_state(local).?),
+            } else null,
+        });
+        return .{
+            .name = name,
+            .arguments = arguments.items,
+            .live = live,
+            .own = own,
+            .foreign = foreign_state != null,
+            .server_scope = if (servable) server_scope.items else null,
+        };
+    }
+
+    /// The expression's first value, run by the consumer's engine: `rt.Value`, or
+    /// unservable when the render holds no value for something it reads.
+    fn server_value(gen: *Generator, e: *const ExpressionIR) Error!OwnInitial {
+        const call = (try gen.slot_call_for(e, .run)) orelse return gen.fail("a server value for an expression that is not compiled", .{});
+        const scope = call.server_scope orelse return .unservable;
+        var fields: std.Io.Writer.Allocating = .init(gen.arena);
+        for (scope) |field| try fields.writer.print(" .{f} = {s},", .{ std.zig.fmtId(field.name), field.value });
+        gen.arena_used = true;
+        return .{
+            .lowered = .{
+                .code = try std.fmt.allocPrint(gen.arena, "(try rt.evaluate({s}, arena, \"{s}\", \"{s}\", {s}, .{{{s} }}))", .{
+                    try gen.expressions_code(),
+                    gen.module.name,
+                    call.name,
+                    gen.state_code(),
+                    fields.written(),
+                }),
+                .type = .value,
+            },
+        };
+    }
+
+    /// The consumer's engine, from the request the render was handed.
+    fn expressions_code(gen: *Generator) Error![]const u8 {
+        if (gen.request.len == 0) return gen.fail("compiled expressions run through the request, and the program declares none", .{});
+        gen.request_used = true;
+        gen.props_used = true;
+        return std.fmt.allocPrint(gen.arena, "(if (props.publr_request) |publr_request| @as(*const Request, @ptrCast(@alignCast(publr_request))).{s} else null)", .{gen.expressions_field});
+    }
+
+    /// The props among a slot's arguments.
+    fn props_read(gen: *Generator, arguments: []const SlotArgument) Error![]const []const u8 {
+        var names: std.ArrayList([]const u8) = .empty;
+        for (arguments) |argument| {
+            if (find_field(gen.module.props, argument.name) != null and std.mem.startsWith(u8, argument.value, "props.")) {
+                try names.append(gen.arena, argument.name);
+            }
+        }
+        return names.items;
+    }
+
+    /// The render instance's state and props as JSON, for an expression.
+    fn state_code(gen: *Generator) []const u8 {
+        if (gen.state_json) |name| {
+            gen.state_json_used = true;
+            gen.arena_used = true;
+            gen.props_used = true;
+            return std.fmt.allocPrint(gen.arena, "(try {s}.text(arena))", .{name}) catch "\"{}\"";
+        }
+        return "\"{}\"";
+    }
+
+    /// A block's capture of the render's state JSON, which it may read.
+    fn capture_state(gen: *Generator, w: *std.Io.Writer) Error!void {
+        const name = gen.state_json orelse return;
+        gen.state_json_used = true;
+        gen.arena_used = true;
+        gen.props_used = true;
+        try w.print(" .{s} = {s},", .{ name, name });
+    }
+
+    /// The module's state as the render holds it: each field's seed or initial value,
+    /// as JSON, declared where the render starts and kept only when an expression
+    /// reads it. A field the render cannot lower is left out (`undefined`).
+    fn write_state_json(gen: *Generator) Error!void {
+        if (gen.expressions_field.len == 0) return;
+        try gen.flush();
+        var fields: std.Io.Writer.Allocating = .init(gen.arena);
+        const initials = if (gen.module.wire) |wire| wire.initials else &.{};
+        const seeds = if (gen.module.wire) |wire| wire.seed_exprs else &.{};
+        for (initials) |initial| {
+            var value = initial.expr orelse continue;
+            for (seeds) |seed| {
+                if (std.mem.eql(u8, seed.field, initial.field)) value = seed.expr;
+            }
+            // A constant is its JSON; anything else, the render's value.
+            if (try expression_js.json(gen.arena, value)) |constant| {
+                try fields.writer.print(" .{f} = rt.Json{{ .text = {s} }},", .{ std.zig.fmtId(initial.field), try zig_string(gen.arena, constant) });
+                continue;
+            }
+            const lowered = gen.expression(value) catch continue;
+            switch (lowered.type) {
+                .string, .opt_string, .boolean, .opt_boolean, .number, .opt_number, .array, .strings, .opt_strings, .enumeration, .opt_enumeration, .null, .item => {},
+                else => continue,
+            }
+            try fields.writer.print(" .{f} = {s},", .{ std.zig.fmtId(initial.field), lowered.code });
+        }
+        gen.state_json = "publr_state";
+        gen.state_offset = gen.body.written().len;
+        gen.state_fields = fields.written();
+        if (gen.is_family_root()) {
+            gen.family_store = gen.root_store;
+            gen.state_json_used = true;
+            gen.arena_used = true;
+            gen.props_used = true;
+            gen.family_code = "publr_family";
+        }
+    }
+
+    /// Whether this module is a family's root, which carries its store.
+    fn is_family_root(gen: *Generator) bool {
+        const wire = gen.module.wire orelse return false;
+        return wire.kind == .family and gen.root_store != null;
+    }
+
+    /// The render instance, declared where the render starts: its state, and the props
+    /// the module's server slots read (known once the module is lowered).
+    fn instance_declaration(gen: *Generator) Error![]const u8 {
+        const code = gen.body.written();
+        var names: std.ArrayList([]const u8) = .empty;
+        for (gen.slots.items) |slot| {
+            const run = try std.fmt.allocPrint(gen.arena, "\"{s}\"", .{slot.name});
+            if (std.mem.indexOf(u8, code, run) == null and std.mem.indexOf(u8, gen.blocks.written(), run) == null) continue;
+            for (slot.props) |name| {
+                if (!util.containsString(names.items, name)) try names.append(gen.arena, name);
+            }
+        }
+        var props: std.Io.Writer.Allocating = .init(gen.arena);
+        for (names.items) |name| try props.writer.print(" .{f} = props.{f},", .{ std.zig.fmtId(name), std.zig.fmtId(name) });
+        const family = if (gen.family_store) |family_store| try std.fmt.allocPrint(
+            gen.arena,
+            "    var publr_family_held = rt.family_of(\"{s}\", publr_state, props.publr_family);\n    const publr_family: ?*const rt.Family = &publr_family_held;\n    _ = &publr_family;\n",
+            .{family_store},
+        ) else "";
+        return std.fmt.allocPrint(
+            gen.arena,
+            "    var publr_state_held = rt.instance(.{{{s} }}, .{{{s} }});\n    const publr_state = &publr_state_held;\n    _ = &publr_state;\n{s}",
+            .{ gen.state_fields, props.written(), family },
+        );
+    }
+
+    /// Whether `name` (as the source spells it) is the row of a list the browser draws.
+    fn is_alias(gen: *Generator, name: []const u8) bool {
+        for (gen.wire_aliases.items) |alias| {
+            if (std.mem.eql(u8, alias, name)) return true;
+            if (std.mem.startsWith(u8, alias, "@\"") and std.mem.eql(u8, alias[2 .. alias.len - 1], name)) return true;
+        }
+        return false;
+    }
+
+    /// The Zig name of a value the render holds under `name` as the source spells it:
+    /// a loop's row; null when there is none (a component binding is not one).
+    fn server_local(gen: *Generator, name: []const u8) ?[]const u8 {
+        var index = gen.locals.items.len;
+        while (index > 0) {
+            index -= 1;
+            const local = gen.locals.items[index];
+            if (local.binding != null) continue;
+            if (std.mem.eql(u8, local.source_name orelse local.name, name)) return local.name;
+        }
+        return null;
+    }
+
+    /// Whether `e` reads markup (a node prop or local): its value may be that markup,
+    /// which only the render can draw, so the engine does not compute it.
+    fn reads_markup(gen: *Generator, e: *const ExpressionIR) Error!bool {
+        for (try expression_js.references(gen.arena, e)) |read| {
+            const read_type: ?Type = switch (read.source) {
+                .prop => if (find_field(gen.module.props, read.name)) |field| field.type else null,
+                .local, .global => for (gen.locals.items) |local| {
+                    if (std.mem.eql(u8, local.source_name orelse local.name, read.name)) break local.type;
+                } else null,
+                .state => null,
+            };
+            const markup = read_type orelse continue;
+            if (markup == .node or markup == .opt_node) return true;
+        }
+        return false;
+    }
+
+    /// A Zig value as an engine's value, where one meets the other.
+    fn as_value(gen: *Generator, lowered: Lowered) Error!Lowered {
+        if (lowered.type == .null) return .{
+            .code = "rt.Value.null",
+            .type = .value,
+        };
+        gen.arena_used = true;
+        return .{
+            .code = try std.fmt.allocPrint(gen.arena, "(try rt.value_of(arena, {s}))", .{lowered.code}),
+            .type = .value,
+        };
+    }
+
+    /// An engine's value as a typed prop: an enum by its tag among the type's own
+    /// (an enum literal fills the callee's type), anything else through `rt.value_into`.
+    fn value_into(gen: *Generator, code: []const u8, target: Type) Error![]const u8 {
+        gen.arena_used = true;
+        switch (target) {
+            .enumeration, .opt_enumeration => |enumeration| {
+                var out: std.Io.Writer.Allocating = .init(gen.arena);
+                try out.writer.print("(switch (try rt.value_tag(arena, {s}, &.{{", .{code});
+                for (enumeration.values) |tag| try out.writer.print(" \"{s}\",", .{tag});
+                try out.writer.writeAll(" })) {");
+                for (enumeration.values, 0..) |tag, index| try out.writer.print(" {d} => .@\"{s}\",", .{ index, tag });
+                if (target == .opt_enumeration) {
+                    try out.writer.writeAll(" else => null })");
+                } else {
+                    try out.writer.writeAll(" else => return error.InvalidEnumTag })");
+                }
+                return out.written();
+            },
+            .string, .opt_string, .boolean, .opt_boolean, .number, .opt_number, .strings, .opt_strings => {
+                return std.fmt.allocPrint(gen.arena, "(try rt.value_into({s}, arena, {s}))", .{ type_code(target), code });
+            },
+            else => return gen.fail("a compiled expression cannot fill a prop of type {s} yet", .{@tagName(target)}),
+        }
+    }
+
+    /// The initial state of the family this module imports its state from, as JSON: its
+    /// constant fields, as a part with no root shares them in the browser.
+    fn foreign_initial(gen: *Generator, foreign: Foreign) Error![]const u8 {
+        for (gen.modules) |candidate| {
+            if (!std.mem.eql(u8, candidate.file_stem, foreign.module_name) and !std.mem.eql(u8, candidate.name, foreign.module_name)) continue;
+            const wire = candidate.wire orelse continue;
+            var text: std.Io.Writer.Allocating = .init(gen.arena);
+            try text.writer.writeAll("{");
+            var separator: []const u8 = "";
+            for (wire.initials) |initial| {
+                const value = initial.expr orelse continue;
+                const constant = (try expression_js.json(gen.arena, value)) orelse continue;
+                try text.writer.print("{s}\"{s}\":{s}", .{ separator, initial.field, constant });
+                separator = ",";
+            }
+            try text.writer.writeAll("}");
+            return text.written();
+        }
+        return gen.fail("the family {s} has no store", .{foreign.module_name});
+    }
+
+    /// The store of the family this module imports its state from.
+    fn foreign_store(gen: *Generator, foreign: Foreign) Error![]const u8 {
+        for (gen.modules) |candidate| {
+            if (std.mem.eql(u8, candidate.file_stem, foreign.module_name) or std.mem.eql(u8, candidate.name, foreign.module_name)) {
+                if (candidate.wire) |wire| return wire.store;
+            }
+        }
+        return gen.fail("the family {s} has no store", .{foreign.module_name});
+    }
+
+    /// The slot as a static wire: an expression whose wire the render need not finish.
+    fn slot_static(gen: *Generator, e: *const ExpressionIR) Error!?Wired {
+        const call = (try gen.slot_call(e)) orelse return null;
+        if (call.arguments.len > 0 or !call.live) return null;
+        return .{
+            .spec = try std.fmt.allocPrint(gen.arena, "${s}", .{call.name}),
+            .own = call.own,
+            .foreign = call.foreign,
+        };
+    }
+
+    /// The slot as Zig code of type `?[]const u8`: the call with its arguments, null
+    /// when it reads nothing live and no caller wired a prop it reads.
+    fn slot_runtime(gen: *Generator, e: *const ExpressionIR) Error!?[]const u8 {
+        const call = (try gen.slot_call(e)) orelse return null;
+        if (call.arguments.len == 0) {
+            if (!call.live) return null;
+            return try std.fmt.allocPrint(gen.arena, "@as(?[]const u8, \"${s}\")", .{call.name});
+        }
+
+        var parts: std.Io.Writer.Allocating = .init(gen.arena);
+        var condition: std.Io.Writer.Allocating = .init(gen.arena);
+        try parts.writer.print("\"${s}(\"", .{call.name});
+        for (call.arguments, 0..) |argument, at| {
+            try parts.writer.print(", \"{s}{s}: \", rt.slot_argument(arena, {s}, {s})", .{
+                if (at > 0) ", " else "",
+                argument.name,
+                argument.wire orelse "null",
+                argument.value,
+            });
+            if (argument.wire) |wire| {
+                if (condition.written().len > 0) try condition.writer.writeAll(" or ");
+                try condition.writer.print("{s} != null", .{wire});
+            }
+        }
+        try parts.writer.writeAll(", \")\"");
+        gen.arena_used = true;
+        const value = try std.fmt.allocPrint(gen.arena, "@as(?[]const u8, rt.concat(arena, &.{{ {s} }}))", .{parts.written()});
+        if (call.live) return value;
+        return try std.fmt.allocPrint(gen.arena, "(if ({s}) {s} else @as(?[]const u8, null))", .{ condition.written(), value });
+    }
+
+    /// A slot wire's negation (`hidden={…}` binds `data-p-show`): the slot of `!(…)`.
+    fn negated_slot(gen: *Generator, spec: []const u8) Error!?[]const u8 {
+        if (!std.mem.startsWith(u8, spec, "$e_")) return null;
+        const slot = for (gen.slots.items) |slot| {
+            if (std.mem.eql(u8, slot.name, spec[1..])) break slot;
+        } else return null;
+        // `hidden={!state.open}` shows on `state.open` itself.
+        if (slot.expression.* == .unary and std.mem.eql(u8, slot.expression.unary.operator, "!")) {
+            if (try gen.wire_spec(slot.expression.unary.argument)) |inner| return inner.spec;
+        }
+        const negation = try gen.arena.create(ExpressionIR);
+        negation.* = .{
+            .unary = .{
+                .operator = "!",
+                .argument = slot.expression,
+            },
+        };
+        const wired = (try gen.slot_static(negation)) orelse return null;
+        return wired.spec;
+    }
+
+    /// The slots the generated code names: those a lowering asked for and then
+    /// set aside are left out of `stores.js`.
+    fn used_slots(gen: *Generator, code: []const u8, use: enum { bound, run }) Error![]const slots_file.Slot {
+        var used: std.ArrayList(slots_file.Slot) = .empty;
+        for (gen.slots.items) |slot| {
+            // A binding names it `$e_…`; a server render, `"e_…"`.
+            const named = switch (use) {
+                .bound => try std.fmt.allocPrint(gen.arena, "${s}", .{slot.name}),
+                .run => try std.fmt.allocPrint(gen.arena, "\"{s}\"", .{slot.name}),
+            };
+            if (std.mem.indexOf(u8, code, named) != null) try used.append(gen.arena, slot);
+        }
+        return used.items;
+    }
 
     /// `state.a.b` → the dotted path, empty for the state object itself;
     /// null when the expression is not a state member chain.
@@ -4063,11 +5097,12 @@ const Generator = struct {
                         };
                     }
                 }
-                if (gen.foreign) |foreign| {
+                if (gen.foreign_of_state(reference_ir.name)) |foreign| {
                     if (foreign.state_local) |state| {
                         if (std.mem.eql(u8, state, reference_ir.name)) return .{
                             .spec = "",
-                            .own = false,
+                            .own = gen.family_served(),
+                            .foreign = true,
                         };
                     }
                 }
@@ -4094,198 +5129,30 @@ const Generator = struct {
                 return .{
                     .spec = path,
                     .own = base.own,
+                    .foreign = base.foreign,
                 };
             },
             else => return null,
         }
     }
 
-    /// `Publr.dataset("value")` → `value`.
-    fn dataset_name(gen: *Generator, e: *const ExpressionIR) ?[]const u8 {
-        _ = gen;
-        if (e.* != .call) return null;
-        const call = e.call;
-        if (call.arguments.len != 1) return null;
-        if (call.callee.* != .member) return null;
-        const member = call.callee.member;
-        if (member.property != .string or !std.mem.eql(u8, member.property.string, "dataset")) return null;
-        if (member.object.* != .reference or !std.mem.eql(u8, member.object.reference.name, "Publr")) return null;
-        const argument = call.arguments[0];
-        if (argument.* != .literal) return null;
-        return if (argument.literal == .string) argument.literal.string else null;
-    }
-
-    /// A literal as wire text: strings quoted `'…'` with `\` and `'` escaped,
-    /// everything else as its JSON text.
-    fn wire_literal(gen: *Generator, e: *const ExpressionIR) Error!?[]const u8 {
-        if (e.* != .literal) return null;
-        return switch (e.literal) {
-            .string => |text| blk: {
-                var out: std.Io.Writer.Allocating = .init(gen.arena);
-                try out.writer.writeByte('\'');
-                for (text) |char| {
-                    if (char == '\\' or char == '\'') try out.writer.writeByte('\\');
-                    try out.writer.writeByte(char);
-                }
-                try out.writer.writeByte('\'');
-                break :blk out.written();
-            },
-            .number => |number| try util.numberToString(gen.arena, number),
-            .boolean => |b| if (b) "true" else "false",
-            .null => null,
-        };
-    }
-
-    /// The right side of a wire comparison: a literal or a dataset read.
-    fn wire_rhs(gen: *Generator, e: *const ExpressionIR) Error!?[]const u8 {
-        if (gen.dataset_name(e)) |name| {
-            return try std.fmt.allocPrint(gen.arena, "@{s}", .{name});
-        }
-        // Another state value (`state.chosen === row.index`): the runtime reads and
-        // follows both sides.
-        if (gen.wire_state_path(e)) |path| {
-            if (path.spec.len > 0) return try std.fmt.allocPrint(gen.arena, "${s}", .{path.spec});
-        }
-        return gen.wire_literal(e);
-    }
-
-    /// The expression as a wire spec, or null when it does not read state.
+    /// The expression as a wire spec, or null when it does not read state: a plain
+    /// state or row path, else a compiled expression's slot.
     fn wire_spec(gen: *Generator, e: *const ExpressionIR) Error!?Wired {
         if (gen.wire_state_path(e)) |path| {
             if (path.spec.len == 0) return null; // the bare state object is not a wire
             return .{
                 .spec = try std.fmt.allocPrint(gen.arena, "${s}", .{path.spec}),
                 .own = path.own,
+                .foreign = path.foreign,
             };
         }
-
-        switch (e.*) {
-            // The empty-template string coercion (`` `${state.n}` ``); a
-            // template with text concatenates (`'More for ' + $row.title`).
-            .template => |template_ir| {
-                var inner: ?*const ExpressionIR = null;
-                var plain = true;
-                for (template_ir.parts) |part| {
-                    switch (part) {
-                        .string => |text| if (text.len != 0) {
-                            plain = false;
-                        },
-                        .expression => |part_expr| if (inner == null) {
-                            inner = part_expr;
-                        } else {
-                            plain = false;
-                        },
-                    }
-                }
-                if (plain) return if (inner) |expr| gen.wire_spec(expr) else null;
-
-                var joined: std.Io.Writer.Allocating = .init(gen.arena);
-                var own = false;
-                var any_wire = false;
-                for (template_ir.parts) |part| {
-                    const operand = switch (part) {
-                        .string => |text| blk: {
-                            if (text.len == 0) continue;
-                            if (std.mem.indexOfScalar(u8, text, '\'') != null) return null;
-                            break :blk try std.fmt.allocPrint(gen.arena, "'{s}'", .{text});
-                        },
-                        .expression => |part_expr| blk: {
-                            if (try gen.wire_spec(part_expr)) |wired| {
-                                any_wire = true;
-                                own = own or wired.own;
-                                break :blk if (std.mem.indexOfAny(u8, wired.spec, " ()") == null) wired.spec else try std.fmt.allocPrint(gen.arena, "({s})", .{wired.spec});
-                            }
-                            const literal = (try gen.wire_literal(part_expr)) orelse return null;
-                            break :blk literal;
-                        },
-                    };
-                    if (joined.written().len > 0) try joined.writer.writeAll(" + ");
-                    try joined.writer.writeAll(operand);
-                }
-                if (!any_wire) return null;
-                return .{
-                    .spec = joined.written(),
-                    .own = own,
-                };
-            },
-            .unary => |unary| {
-                if (!std.mem.eql(u8, unary.operator, "!")) return null;
-                const inner = (try gen.wire_spec(unary.argument)) orelse return null;
-                return .{
-                    .spec = try gen.invert_wire(inner.spec),
-                    .own = inner.own,
-                };
-            },
-            // `state.values.includes(Publr.dataset("value"))` → membership.
-            .call => |call| {
-                if (call.arguments.len != 1) return null;
-                if (call.callee.* != .member) return null;
-                const member = call.callee.member;
-                if (member.property != .string or !std.mem.eql(u8, member.property.string, "includes")) return null;
-                const receiver = gen.wire_state_path(member.object) orelse return null;
-                if (receiver.spec.len == 0) return null;
-                const rhs = (try gen.wire_rhs(call.arguments[0])) orelse return null;
-                return .{
-                    .spec = try std.fmt.allocPrint(gen.arena, "${s} contains {s}", .{ receiver.spec, rhs }),
-                    .own = receiver.own,
-                };
-            },
-            .operation => |operation_ir| {
-                const operator = operation_ir.operator;
-                const left = gen.wire_state_path(operation_ir.left) orelse return null;
-                if (left.spec.len == 0) return null;
-
-                const mapped: ?[]const u8 = if (std.mem.eql(u8, operator, "===") or std.mem.eql(u8, operator, "=="))
-                    "=="
-                else if (std.mem.eql(u8, operator, "!==") or std.mem.eql(u8, operator, "!="))
-                    "!="
-                else if (std.mem.eql(u8, operator, ">=") or std.mem.eql(u8, operator, "<=") or
-                    std.mem.eql(u8, operator, ">") or std.mem.eql(u8, operator, "<"))
-                    operator
-                else if (std.mem.eql(u8, operator, "||"))
-                    "~"
-                else
-                    null;
-
-                if (mapped) |op| {
-                    const rhs = (try gen.wire_rhs(operation_ir.right)) orelse return null;
-                    return .{
-                        .spec = try std.fmt.allocPrint(gen.arena, "${s} {s} {s}", .{ left.spec, op, rhs }),
-                        .own = left.own,
-                    };
-                }
-                return null;
-            },
-            // Ternary: the two-arm bind form `cond -> a ~ b`; an arm is a literal or
-            // itself a wire, grouped (`$h > 0 -> ('height:' + $h + 'px') ~ ''`).
-            .conditional => |conditional| {
-                const test_wire = (try gen.wire_spec(conditional.@"test")) orelse return null;
-                const consequent = (try gen.wire_arm(conditional.consequent)) orelse return null;
-                const alternate = (try gen.wire_arm(conditional.alternate)) orelse return null;
-                return .{
-                    .spec = try std.fmt.allocPrint(gen.arena, "{s} -> {s} ~ {s}", .{ test_wire.spec, consequent.spec, alternate.spec }),
-                    .own = test_wire.own or consequent.own or alternate.own,
-                };
-            },
-            else => return null,
-        }
-    }
-
-    /// One arm of a ternary wire: a literal, or a wire in parentheses.
-    fn wire_arm(gen: *Generator, e: *const ExpressionIR) Error!?Wired {
-        if (try gen.wire_literal(e)) |literal| return .{
-            .spec = literal,
-            .own = false,
-        };
-        const wired = (try gen.wire_spec(e)) orelse return null;
-        return .{
-            .spec = try std.fmt.allocPrint(gen.arena, "({s})", .{wired.spec}),
-            .own = wired.own,
-        };
+        return gen.slot_static(e);
     }
 
     /// Preserve numeric negation: NaN makes !(a <= b) differ from a > b.
     fn invert_wire(gen: *Generator, spec: []const u8) Error![]const u8 {
+        if (try gen.negated_slot(spec)) |negated| return negated;
         if (std.mem.startsWith(u8, spec, "not ")) {
             return spec[4..];
         }
@@ -4305,555 +5172,67 @@ const Generator = struct {
         return std.fmt.allocPrint(gen.arena, "not {s}", .{spec});
     }
 
-    /// A class layer written as a ternary over state with literal string
-    /// arms — the `cond -> a ~ b` class-wire group (class names unquoted).
+    /// A class layer over state: its slot, whose value is the class list.
     fn class_wire_group(gen: *Generator, e: *const ExpressionIR) Error!?Wired {
-        if (e.* != .conditional) return null;
-        const conditional = e.conditional;
-        const test_wire = (try gen.wire_spec(conditional.@"test")) orelse return null;
-        const consequent = string_of_literal(conditional.consequent) orelse return null;
-        const alternate = string_of_literal(conditional.alternate) orelse return null;
-        const when_true = std.mem.trim(u8, consequent, " ");
-        const when_false = std.mem.trim(u8, alternate, " ");
-
-        if (when_true.len == 0 and when_false.len == 0) return null;
-        if (when_true.len != 0 and when_false.len != 0) {
-            return .{
-                .spec = try std.fmt.allocPrint(gen.arena, "{s} -> {s} ~ {s}", .{ test_wire.spec, when_true, when_false }),
-                .own = test_wire.own,
-            };
-        }
-        if (when_true.len != 0) {
-            return .{
-                .spec = try std.fmt.allocPrint(gen.arena, "{s} -> {s}", .{ test_wire.spec, when_true }),
-                .own = test_wire.own,
-            };
-        }
-        return .{
-            .spec = try std.fmt.allocPrint(gen.arena, "{s} -> {s}", .{ try gen.invert_wire(test_wire.spec), when_false }),
-            .own = test_wire.own,
-        };
+        return gen.slot_static(e);
     }
 
     // -- prop wires ---------------------------------------------------------
     //
     // A component called inside a list template receives its row-dependent
-    // props as wires (`publr_bind_<prop>`) with placeholder values. Every use
-    // of such a prop re-emits the wire, composed at render time: the value is
-    // evaluated at compile time for each value of the finite props it reads
-    // (booleans, small enums), and the results become a match over each wired
-    // prop's wire (`rt.wire_match`); unbounded props (strings, numbers, large
-    // enums) stay operands (`($row.title)`), compared or concatenated in the
-    // wire. Null when the expression reads no wirable prop, reads anything
-    // else, or needs what the wire language cannot say.
+    // props as wires (`publr_bind_<prop>`) with placeholder values. An expression
+    // over such props is a compiled expression with them as arguments, each the
+    // caller's wire (`$e_Badge_2(tone: $row.tone)`), bound only when a caller
+    // wired one of them; a bare prop hands the caller's wire on unchanged.
 
     const PropWireMode = enum {
         /// A value spec (`data-p-text`, `data-p-bind`, `data-p-if`, a callee's
         /// `publr_bind_*`).
         value,
-        /// A `data-p-class` group: the class lists become arms keyed by index,
-        /// so each swap removes the lists of the other arms.
+        /// A `data-p-class` group, whose value is the class list.
         classes,
     };
 
-    const Const = union(enum) {
-        string: []const u8,
-        boolean: bool,
-        number: f64,
-        absent,
-    };
-
-    const PropEval = union(enum) {
-        constant: Const,
-        /// Zig code of type `[]const u8`: a wire spec.
-        spec: []const u8,
-    };
-
-    const Assigned = struct {
-        name: []const u8,
-        value: Const,
-    };
-
-    /// Enums larger than this are unbounded operands, not matched per value.
-    const prop_domain_max = 24;
-
     /// The runtime wire (Zig code of type `?[]const u8`, null when no prop it
-    /// reads is wired) of a prop-derived expression; see above.
+    /// reads is wired) of a prop-derived expression.
     fn prop_wire(gen: *Generator, e: *const ExpressionIR, mode: PropWireMode) Error!?[]const u8 {
         if (gen.prop_wire_skip) |skip| if (skip == e) return null;
-
-        var names: std.ArrayList([]const u8) = .empty;
-        if (!try gen.prop_dependencies(e, &names, 0)) return null;
-        if (names.items.len == 0) return null;
-
-        var finite: std.ArrayList(Field) = .empty;
-        for (names.items) |name| {
-            const field = find_field(gen.module.props, name).?;
-            if (try gen.prop_domain(field) != null) try finite.append(gen.arena, field);
+        // A prop as it is: the caller's wire, unchanged. As a class layer it is a
+        // value, grouped by the value form (a path is not a class group).
+        if (e.* == .reference and e.reference.source == .prop) {
+            if (mode == .classes) return null;
+            const field = find_field(gen.module.props, e.reference.name) orelse return null;
+            if (!field.bind_transport) return null;
+            gen.props_used = true;
+            return try std.fmt.allocPrint(gen.arena, "props.publr_bind_{s}", .{e.reference.name});
         }
-
-        var classes: std.ArrayList([]const u8) = .empty;
-        var assignment: std.ArrayList(Assigned) = .empty;
-        const tree = (try gen.prop_tree(e, finite.items, &assignment, if (mode == .classes) &classes else null)) orelse return null;
-
-        var any: std.Io.Writer.Allocating = .init(gen.arena);
-        for (names.items, 0..) |name, index| {
-            try any.writer.print("{s}props.publr_bind_{s} != null", .{ if (index == 0) "" else " or ", name });
-        }
-        gen.props_used = true;
-        gen.arena_used = true;
-
-        if (mode == .value) {
-            return try std.fmt.allocPrint(gen.arena, "(if ({s}) {s} else @as(?[]const u8, null))", .{ any.written(), tree });
-        }
-
-        var arms: std.Io.Writer.Allocating = .init(gen.arena);
-        try arms.writer.writeAll(" {");
-        for (classes.items, 0..) |class, index| {
-            try arms.writer.print("{s} '{d}': {s}", .{ if (index == 0) "" else ",", index, class });
-        }
-        try arms.writer.writeAll(" }");
-        const capture = try gen.fresh_prop("publr_classes");
-        return try std.fmt.allocPrint(
-            gen.arena,
-            "(if ({s}) (if ({s}) |{s}| @as(?[]const u8, rt.concat(arena, &.{{ rt.wire_group(arena, {s}), {s} }})) else @as(?[]const u8, null)) else @as(?[]const u8, null))",
-            .{ any.written(), tree, capture, capture, try zig_string(gen.arena, arms.written()) },
-        );
-    }
-
-    /// The finite values a prop takes — booleans, enums up to
-    /// `prop_domain_max`, and `absent` for optionals; null when unbounded.
-    fn prop_domain(gen: *Generator, field: Field) Error!?[]const Const {
-        var values: std.ArrayList(Const) = .empty;
-        switch (field.type.unwrapped()) {
-            .boolean => {
-                try values.append(gen.arena, .{
-                    .boolean = true,
-                });
-                try values.append(gen.arena, .{
-                    .boolean = false,
-                });
-            },
-            .enumeration => |e| {
-                if (e.values.len > prop_domain_max) return null;
-                for (e.values) |tag| try values.append(gen.arena, .{
-                    .string = tag,
-                });
-            },
-            else => return null,
-        }
-        if (field.type.is_optional()) try values.append(gen.arena, .absent);
-        return values.items;
-    }
-
-    /// Collects the wirable props `e` reads, through the component's own
-    /// bindings and finite maps; false when it reads anything else.
-    fn prop_dependencies(gen: *Generator, e: *const ExpressionIR, names: *std.ArrayList([]const u8), depth: u32) Error!bool {
-        if (depth > 16) return false;
-        switch (e.*) {
-            .literal, .absent => return true,
-            .reference => |reference_ir| switch (reference_ir.source) {
-                .prop => {
-                    const field = find_field(gen.module.props, reference_ir.name) orelse return false;
-                    if (!field.bind_transport) return false;
-                    if (!util.containsString(names.items, reference_ir.name)) try names.append(gen.arena, reference_ir.name);
-                    return true;
-                },
-                .local => {
-                    if (gen.binding_of(reference_ir.name)) |initializer| return gen.prop_dependencies(initializer, names, depth + 1);
-                    return gen.finite_map_named(reference_ir.name) != null;
-                },
-                else => return false,
-            },
-            .member => |member| switch (member.property) {
-                .string => return false,
-                .number => return gen.prop_dependencies(member.object, names, depth + 1),
-                .expression => |key| return try gen.prop_dependencies(member.object, names, depth + 1) and
-                    try gen.prop_dependencies(key, names, depth + 1),
-            },
-            .unary => |unary| return gen.prop_dependencies(unary.argument, names, depth + 1),
-            .operation => |operation_ir| return try gen.prop_dependencies(operation_ir.left, names, depth + 1) and
-                try gen.prop_dependencies(operation_ir.right, names, depth + 1),
-            .conditional => |c| return try gen.prop_dependencies(c.@"test", names, depth + 1) and
-                try gen.prop_dependencies(c.consequent, names, depth + 1) and
-                try gen.prop_dependencies(c.alternate, names, depth + 1),
-            .template => |template_ir| {
-                for (template_ir.parts) |part| switch (part) {
-                    .string => {},
-                    .expression => |part_expr| if (!try gen.prop_dependencies(part_expr, names, depth + 1)) return false,
-                };
-                return true;
-            },
-            else => return false,
-        }
-    }
-
-    /// The module's finite map of that name, unless a local shadows it.
-    fn finite_map_named(gen: *Generator, name: []const u8) ?[]const Type.MapEntry {
-        for (gen.locals.items) |local| {
-            if (std.mem.eql(u8, local.source_name orelse local.name, name)) return null;
-        }
-        for (gen.module.finite_maps) |map| {
-            if (std.mem.eql(u8, map.name, name)) return map.entries;
-        }
-        return null;
-    }
-
-    /// The decision tree over the finite props (Zig code of type
-    /// `?[]const u8`): per prop, a match over its wire when wired, a switch
-    /// on its value otherwise; at the leaves, the expression's value under
-    /// the assignment as wire text (a class list's index in `classes` mode).
-    fn prop_tree(gen: *Generator, e: *const ExpressionIR, finite: []const Field, assignment: *std.ArrayList(Assigned), classes: ?*std.ArrayList([]const u8)) Error!?[]const u8 {
-        if (assignment.items.len == finite.len) {
-            const result = (try gen.prop_eval(e, assignment.items, 0)) orelse return null;
-            switch (result) {
-                .constant => |value| {
-                    if (classes) |list| {
-                        const class = switch (value) {
-                            .string => |text| std.mem.trim(u8, text, " "),
-                            .absent => "",
-                            else => return null,
-                        };
-                        const index = for (list.items, 0..) |known, index| {
-                            if (std.mem.eql(u8, known, class)) break index;
-                        } else blk: {
-                            try list.append(gen.arena, class);
-                            break :blk list.items.len - 1;
-                        };
-                        return try std.fmt.allocPrint(gen.arena, "@as(?[]const u8, \"'{d}'\")", .{index});
-                    }
-                    if (value == .absent) return "@as(?[]const u8, null)";
-                    return try std.fmt.allocPrint(gen.arena, "@as(?[]const u8, {s})", .{try zig_string(gen.arena, (try gen.const_wire_text(value)) orelse return null)});
-                },
-                .spec => |code| {
-                    if (classes != null) return null;
-                    return try std.fmt.allocPrint(gen.arena, "@as(?[]const u8, {s})", .{code});
-                },
-            }
-        }
-
-        const field = finite[assignment.items.len];
-        const domain = (try gen.prop_domain(field)).?;
-        var subs = try gen.arena.alloc([]const u8, domain.len);
-        for (domain, 0..) |value, index| {
-            try assignment.append(gen.arena, .{
-                .name = field.name,
-                .value = value,
-            });
-            defer _ = assignment.pop();
-            subs[index] = (try gen.prop_tree(e, finite, assignment, classes)) orelse return null;
-        }
-
-        // A tree that maps each value to itself is the wire itself.
-        const identity = classes == null and !field.type.is_optional() and for (domain, subs) |value, sub| {
-            const text = (try gen.const_wire_text(value)) orelse break false;
-            const own = try std.fmt.allocPrint(gen.arena, "@as(?[]const u8, {s})", .{try zig_string(gen.arena, text)});
-            if (!std.mem.eql(u8, own, sub)) break false;
-        } else true;
-
-        var arms: std.Io.Writer.Allocating = .init(gen.arena);
-        for (domain, subs) |value, sub| {
-            const key: []const u8 = switch (value) {
-                .boolean => |b| if (b) "true" else "false",
-                .string => |tag| (try gen.const_wire_text(value)) orelse return gen.fail("enum value {s} cannot be a wire key", .{tag}),
-                .absent => "_",
-                .number => unreachable,
-            };
-            try arms.writer.print(" .{{ .key = {s}, .value = {s} }},", .{ try zig_string(gen.arena, key), sub });
-        }
-
-        const value_code = try std.fmt.allocPrint(gen.arena, "props.{f}", .{std.zig.fmtId(field.name)});
-        const unwrapped = if (field.type.is_optional()) try gen.fresh_prop("publr_value") else value_code;
-        const switched = switch (field.type.unwrapped()) {
-            .boolean => try std.fmt.allocPrint(gen.arena, "(if ({s}) {s} else {s})", .{ unwrapped, subs[0], subs[1] }),
-            .enumeration => |enumeration| blk: {
-                var cases: std.Io.Writer.Allocating = .init(gen.arena);
-                for (enumeration.values, 0..) |tag, index| {
-                    try cases.writer.print(" .@\"{s}\" => {s},", .{ tag, subs[index] });
-                }
-                break :blk try std.fmt.allocPrint(gen.arena, "(switch ({s}) {{{s} }})", .{ unwrapped, cases.written() });
-            },
-            else => unreachable,
-        };
-        const selected = if (field.type.is_optional())
-            try std.fmt.allocPrint(gen.arena, "(if ({s}) |{s}| {s} else {s})", .{ value_code, unwrapped, switched, subs[subs.len - 1] })
-        else
-            switched;
-
-        const capture = try gen.fresh_prop("publr_wire");
-        if (identity) {
-            return try std.fmt.allocPrint(gen.arena, "(if (props.publr_bind_{s}) |{s}| @as(?[]const u8, {s}) else {s})", .{ field.name, capture, capture, selected });
-        }
-        return try std.fmt.allocPrint(gen.arena, "(if (props.publr_bind_{s}) |{s}| @as(?[]const u8, rt.wire_match(arena, {s}, &.{{{s} }})) else {s})", .{
-            field.name,
-            capture,
-            capture,
-            arms.written(),
-            selected,
-        });
-    }
-
-    /// A compile-time value as wire text: strings quoted (with whichever
-    /// quote they do not contain), `null` when absent.
-    fn const_wire_text(gen: *Generator, value: Const) Error!?[]const u8 {
-        return switch (value) {
-            .string => |text| blk: {
-                const quote: u8 = if (std.mem.indexOfScalar(u8, text, '\'') == null) '\'' else if (std.mem.indexOfScalar(u8, text, '"') == null) '"' else break :blk null;
-                break :blk try std.fmt.allocPrint(gen.arena, "{c}{s}{c}", .{ quote, text, quote });
-            },
-            .boolean => |b| if (b) "true" else "false",
-            .number => |n| try util.numberToString(gen.arena, n),
-            .absent => "null",
-        };
-    }
-
-    fn const_truthy(value: Const) bool {
-        return switch (value) {
-            .string => |text| text.len != 0,
-            .boolean => |b| b,
-            .number => |n| n != 0 and !std.math.isNan(n),
-            .absent => false,
-        };
-    }
-
-    fn const_equal(left: Const, right: Const) bool {
-        return switch (left) {
-            .string => |a| right == .string and std.mem.eql(u8, a, right.string),
-            .boolean => |a| right == .boolean and a == right.boolean,
-            .number => |a| right == .number and a == right.number,
-            .absent => right == .absent,
-        };
-    }
-
-    /// A wire operand for a result: a spec grouped, a constant as its text.
-    fn prop_operand(gen: *Generator, value: PropEval) Error!?[]const u8 {
-        return switch (value) {
-            .spec => |code| try std.fmt.allocPrint(gen.arena, "rt.wire_group(arena, {s})", .{code}),
-            .constant => |c| if (try gen.const_wire_text(c)) |text| try zig_string(gen.arena, text) else null,
-        };
-    }
-
-    /// `e` under an assignment of its finite props: a constant, or a spec
-    /// over its unbounded props; null when the wire language cannot say it.
-    fn prop_eval(gen: *Generator, e: *const ExpressionIR, assignment: []const Assigned, depth: u32) Error!?PropEval {
-        if (depth > 16) return null;
-        switch (e.*) {
-            .literal => |literal| return .{
-                .constant = switch (literal) {
-                    .string => |text| .{
-                        .string = text,
-                    },
-                    .number => |n| .{
-                        .number = n,
-                    },
-                    .boolean => |b| .{
-                        .boolean = b,
-                    },
-                    .null => .absent,
-                },
-            },
-            .absent => return .{
-                .constant = .absent,
-            },
-            .reference => |reference_ir| switch (reference_ir.source) {
-                .prop => {
-                    for (assignment) |assigned| {
-                        if (std.mem.eql(u8, assigned.name, reference_ir.name)) return .{
-                            .constant = assigned.value,
-                        };
-                    }
-                    return .{
-                        .spec = try std.fmt.allocPrint(gen.arena, "rt.wire_value(arena, props.publr_bind_{s}, props.{f})", .{ reference_ir.name, std.zig.fmtId(reference_ir.name) }),
-                    };
-                },
-                .local => {
-                    const initializer = gen.binding_of(reference_ir.name) orelse return null;
-                    return gen.prop_eval(initializer, assignment, depth + 1);
-                },
-                else => return null,
-            },
-            .member => |member| {
-                if (member.object.* != .reference) return null;
-                const entries = gen.finite_map_named(member.object.reference.name) orelse return null;
-                const key: Const = switch (member.property) {
-                    .string => return null,
-                    .number => |n| .{
-                        .number = n,
-                    },
-                    .expression => |key_expr| switch ((try gen.prop_eval(key_expr, assignment, depth + 1)) orelse return null) {
-                        .constant => |c| c,
-                        .spec => return null,
-                    },
-                };
-                if (key != .string) return .{
-                    .constant = .absent,
-                };
-                return .{
-                    .constant = if (finite_value(entries, key.string)) |value| .{
-                        .string = value,
-                    } else .absent,
-                };
-            },
-            .unary => |unary| {
-                const argument = (try gen.prop_eval(unary.argument, assignment, depth + 1)) orelse return null;
-                if (std.mem.eql(u8, unary.operator, "!")) return switch (argument) {
-                    .constant => |c| .{
-                        .constant = .{
-                            .boolean = !const_truthy(c),
-                        },
-                    },
-                    .spec => |code| .{
-                        .spec = try std.fmt.allocPrint(gen.arena, "rt.concat(arena, &.{{ \"not \", rt.wire_group(arena, {s}) }})", .{code}),
-                    },
-                };
-                if (std.mem.eql(u8, unary.operator, "-") and argument == .constant and argument.constant == .number) {
-                    return .{
-                        .constant = .{
-                            .number = -argument.constant.number,
-                        },
-                    };
-                }
-                return null;
-            },
-            .operation => |operation_ir| {
-                const operator = operation_ir.operator;
-                const left = (try gen.prop_eval(operation_ir.left, assignment, depth + 1)) orelse return null;
-
-                if (std.mem.eql(u8, operator, "&&") or std.mem.eql(u8, operator, "||") or std.mem.eql(u8, operator, "??")) {
-                    const c = switch (left) {
-                        .constant => |c| c,
-                        .spec => return null,
-                    };
-                    const take_left = if (std.mem.eql(u8, operator, "&&")) !const_truthy(c) else if (std.mem.eql(u8, operator, "||")) const_truthy(c) else c != .absent;
-                    return if (take_left) left else gen.prop_eval(operation_ir.right, assignment, depth + 1);
-                }
-
-                const right = (try gen.prop_eval(operation_ir.right, assignment, depth + 1)) orelse return null;
-                const equality = std.mem.eql(u8, operator, "===") or std.mem.eql(u8, operator, "==");
-                const inequality = std.mem.eql(u8, operator, "!==") or std.mem.eql(u8, operator, "!=");
-
-                if (equality or inequality) {
-                    if (left == .constant and right == .constant) {
-                        return .{
-                            .constant = .{
-                                .boolean = const_equal(left.constant, right.constant) == equality,
-                            },
-                        };
-                    }
-                    if (left == .spec and right == .spec) return null;
-                    const spec = if (left == .spec) left.spec else right.spec;
-                    const other = if (left == .spec) right.constant else left.constant;
-                    const literal = (try gen.const_wire_text(other)) orelse return null;
-                    return .{
-                        .spec = try std.fmt.allocPrint(gen.arena, "rt.concat(arena, &.{{ rt.wire_group(arena, {s}), {s} }})", .{
-                            spec,
-                            try zig_string(gen.arena, try std.fmt.allocPrint(gen.arena, " {s} {s}", .{ if (equality) "==" else "!=", literal })),
-                        }),
-                    };
-                }
-
-                if (std.mem.eql(u8, operator, "+")) {
-                    if (left == .constant and right == .constant) {
-                        if (left.constant == .number and right.constant == .number) return .{
-                            .constant = .{
-                                .number = left.constant.number + right.constant.number,
-                            },
-                        };
-                        if (left.constant == .string and right.constant == .string) {
-                            return .{
-                                .constant = .{
-                                    .string = try std.fmt.allocPrint(gen.arena, "{s}{s}", .{ left.constant.string, right.constant.string }),
-                                },
-                            };
-                        }
-                        return null;
-                    }
-                    return .{
-                        .spec = try std.fmt.allocPrint(gen.arena, "rt.concat(arena, &.{{ {s}, \" + \", {s} }})", .{
-                            (try gen.prop_operand(left)) orelse return null,
-                            (try gen.prop_operand(right)) orelse return null,
-                        }),
-                    };
-                }
-                return null;
-            },
-            .conditional => |c| {
-                const test_value = (try gen.prop_eval(c.@"test", assignment, depth + 1)) orelse return null;
-                switch (test_value) {
-                    .constant => |value| return gen.prop_eval(if (const_truthy(value)) c.consequent else c.alternate, assignment, depth + 1),
-                    .spec => |code| {
-                        var arms: [2][]const u8 = undefined;
-                        for ([_]*const ExpressionIR{ c.consequent, c.alternate }, 0..) |arm, index| {
-                            arms[index] = switch ((try gen.prop_eval(arm, assignment, depth + 1)) orelse return null) {
-                                .spec => |arm_code| arm_code,
-                                .constant => |value| if (value == .absent) "null" else try zig_string(gen.arena, (try gen.const_wire_text(value)) orelse return null),
-                            };
-                        }
-                        return .{
-                            .spec = try std.fmt.allocPrint(gen.arena, "rt.wire_match(arena, {s}, &.{{ .{{ .key = \"true\", .value = {s} }}, .{{ .key = \"false\", .value = {s} }} }})", .{ code, arms[0], arms[1] }),
-                        };
-                    },
-                }
-            },
-            .template => |template_ir| {
-                var text: std.Io.Writer.Allocating = .init(gen.arena);
-                var operands: std.ArrayList([]const u8) = .empty;
-                var all_constant = true;
-                for (template_ir.parts) |part| {
-                    const value: PropEval = switch (part) {
-                        .string => |literal| .{
-                            .constant = .{
-                                .string = literal,
-                            },
-                        },
-                        .expression => |part_expr| (try gen.prop_eval(part_expr, assignment, depth + 1)) orelse return null,
-                    };
-                    switch (value) {
-                        .constant => |c| switch (c) {
-                            .string => |literal| try text.writer.writeAll(literal),
-                            .number => |n| try text.writer.writeAll(try util.numberToString(gen.arena, n)),
-                            else => return null,
-                        },
-                        .spec => |code| {
-                            all_constant = false;
-                            if (text.written().len > 0) {
-                                try operands.append(gen.arena, try zig_string(gen.arena, (try gen.const_wire_text(.{
-                                    .string = text.written(),
-                                })) orelse return null));
-                                text = .init(gen.arena);
-                            }
-                            try operands.append(gen.arena, try std.fmt.allocPrint(gen.arena, "rt.wire_group(arena, {s})", .{code}));
-                        },
-                    }
-                }
-                if (all_constant) return .{
-                    .constant = .{
-                        .string = text.written(),
-                    },
-                };
-                if (text.written().len > 0) {
-                    try operands.append(gen.arena, try zig_string(gen.arena, (try gen.const_wire_text(.{
-                        .string = text.written(),
-                    })) orelse return null));
-                }
-                var joined: std.Io.Writer.Allocating = .init(gen.arena);
-                for (operands.items, 0..) |operand, index| {
-                    if (index > 0) try joined.writer.writeAll(" \" + \",");
-                    try joined.writer.print(" {s},", .{operand});
-                }
-                return .{
-                    .spec = try std.fmt.allocPrint(gen.arena, "rt.concat(arena, &.{{{s} }})", .{joined.written()}),
-                };
-            },
-            else => return null,
-        }
+        const call = (try gen.slot_call(e)) orelse return null;
+        if (call.arguments.len == 0) return null;
+        return gen.slot_runtime(e);
     }
 
     // -- expressions as Zig values --
 
     /// The expression as a typed Zig expression.
     fn expression(gen: *Generator, e: *const ExpressionIR) Error!Lowered {
-        const lowered = try gen.expression_value(e);
+        // With an engine, a live expression's value is the engine's, run as the
+        // browser runs it; a plain path is read as it is.
+        var fallback = false;
+        if (gen.expressions_field.len > 0 and gen.native_depth == 0 and gen.wire_state_path(e) == null) {
+            const live = if (try gen.slot_call_for(e, .peek)) |call| call.live else false;
+            if (live) return gen.engine_value(e);
+            // A static computation the render lowers itself where it can, the engine
+            // where it cannot (decided 2026-10-08); a read (`row.title`) is read here.
+            fallback = !is_read(e) and expression_js.printable(e) and !reads_request(e) and
+                !try gen.reads_markup(e);
+        }
+        const lowered = if (fallback)
+            gen.attempt(e) catch |failure| switch (failure) {
+                error.Pjsx => return gen.engine_value(e),
+                else => return failure,
+            }
+        else
+            try gen.expression_value(e);
         if (lowered.type.is_optional()) for (gen.present_values.items) |code| {
             if (util.eql(code, lowered.code)) return .{
                 .code = try std.fmt.allocPrint(gen.arena, "({s}).?", .{lowered.code}),
@@ -4861,6 +5240,32 @@ const Generator = struct {
             };
         };
         return lowered;
+    }
+
+    /// The engine's value for `e`, or `undefined` when the render holds no value for
+    /// something it reads.
+    fn engine_value(gen: *Generator, e: *const ExpressionIR) Error!Lowered {
+        return switch (try gen.server_value(e)) {
+            .lowered => |lowered| lowered,
+            .unservable => .{
+                .code = "rt.Value.undefined",
+                .type = .value,
+            },
+        };
+    }
+
+    /// `expression_value`, leaving nothing behind when it fails: what it wrote is
+    /// taken back, so the engine can take the expression instead.
+    fn attempt(gen: *Generator, e: *const ExpressionIR) Error!Lowered {
+        const written = gen.body.writer.end;
+        const pending = gen.pending.items.len;
+        const counter = gen.counter;
+        return gen.expression_value(e) catch |failure| {
+            gen.body.writer.end = written;
+            gen.pending.shrinkRetainingCapacity(pending);
+            gen.counter = counter;
+            return failure;
+        };
     }
 
     fn expression_value(gen: *Generator, e: *const ExpressionIR) Error!Lowered {
@@ -4884,6 +5289,8 @@ const Generator = struct {
                 },
             },
             .call => |call| {
+                if (call.optional) return gen.fail("`?.()` is not lowered", .{});
+                if (translation_of(call.callee)) |kind| return gen.translation(call.arguments, kind);
                 if (call.callee.* == .reference) {
                     const name = call.callee.reference.name;
                     for (gen.module.bindings) |binding| {
@@ -4942,7 +5349,8 @@ const Generator = struct {
                         }
                         const function = call.arguments[0].function;
                         if (function.parameters.len != 1) return gen.fail("findIndex takes a one-parameter arrow function", .{});
-                        const parameter = function.parameters[0];
+                        const parameter_source = function.parameters[0];
+                        const parameter = try gen.local_name(parameter_source);
 
                         const subject = try gen.expression(callee_member.object);
                         const item_type: Type = switch (subject.type) {
@@ -4955,6 +5363,7 @@ const Generator = struct {
 
                         try gen.locals.append(gen.arena, .{
                             .name = parameter,
+                            .source_name = parameter_source,
                             .type = item_type,
                         });
                         const predicate = try gen.truthy(try gen.expression(function.body));
@@ -5029,6 +5438,11 @@ const Generator = struct {
                     return gen.request_root();
                 }
                 const object = try gen.expression(member.object);
+                // `a?.b` on a value the types say is there reads it; on one that may be
+                // missing it is the engine's.
+                if (member.optional and object.type.is_optional()) {
+                    return gen.fail("`?.` on an optional {s} is not lowered", .{@tagName(object.type)});
+                }
 
                 if (member.property != .string) {
                     // `items[i]`: indexing a struct-array by an integer.
@@ -5160,6 +5574,7 @@ const Generator = struct {
                 return gen.select(test_code, consequent, alternate);
             },
             .template => return gen.template(e),
+            .chain => |chain| return gen.expression(chain.expression),
             .unsupported => |unsupported| return gen.fail("expression kind \"unsupported\" ({s}) is not lowered here", .{unsupported.feature}),
             else => return gen.fail("expression kind \"{s}\" is not lowered here", .{@tagName(e.*)}),
         }
@@ -5202,6 +5617,71 @@ const Generator = struct {
         };
     }
 
+    /// `Publr.t("Save")`, `Publr.tx("verb", "Post")`, `Publr.tn("{count} record",
+    /// "{count} records", count)`, each with an optional `{ name: value }` last: the message
+    /// through the catalogue the request carries (`publr_translations`), else as written.
+    /// The messages are literal strings, so they can be collected for translators.
+    fn translation(gen: *Generator, arguments: []const *const ExpressionIR, kind: Translation) Error!Lowered {
+        const texts: usize = switch (kind) {
+            .t => 1,
+            .tx, .tn => 2,
+        };
+        const fixed = texts + @as(usize, if (kind == .tn) 1 else 0);
+        if (arguments.len < fixed or arguments.len > fixed + 1) {
+            return gen.fail("Publr.{s} takes {d} arguments and an optional {{ name: value }}", .{ @tagName(kind), fixed });
+        }
+        var literals: [2][]const u8 = .{ "", "" };
+        for (arguments[0..texts], 0..) |argument, index| {
+            literals[index] = string_of_literal(argument) orelse
+                return gen.fail("Publr.{s} takes literal strings, so they can be translated", .{@tagName(kind)});
+        }
+        const context = if (kind == .tx) literals[0] else "";
+        const id = if (kind == .tx) literals[1] else literals[0];
+        const plural = if (kind == .tn) literals[1] else "";
+        const count = if (kind == .tn) try gen.expression(arguments[2]) else null;
+        if (count) |lowered| if (lowered.type != .number) return gen.fail("Publr.tn counts a number", .{});
+
+        var values: std.Io.Writer.Allocating = .init(gen.arena);
+        if (arguments.len == fixed + 1) {
+            const given = arguments[fixed];
+            if (given.* != .object) return gen.fail("Publr.{s}'s last argument is {{ name: value }}", .{@tagName(kind)});
+            for (given.object.fields) |field| {
+                const lowered = try gen.expression(field.value);
+                const text = switch (lowered.type) {
+                    .string => lowered.code,
+                    .number => try std.fmt.allocPrint(gen.arena, "try rt.number_to_string(arena, {s})", .{lowered.code}),
+                    else => return gen.fail("a placeholder is a string or a number, not a {s}", .{@tagName(lowered.type)}),
+                };
+                try values.writer.print(" .{{ .name = {s}, .value = {s} }},", .{ try zig_string(gen.arena, field.name), text });
+            }
+        }
+
+        gen.arena_used = true;
+        gen.props_used = true;
+        const catalogue = if (gen.request.len == 0)
+            "null"
+        else
+            "(if (comptime @hasField(Request, \"publr_translations\")) (if (props.publr_request) |publr_translate_request| " ++
+                "@as(*const Request, @ptrCast(@alignCast(publr_translate_request))).publr_translations else null) else null)";
+        if (gen.request.len > 0) gen.request_used = true;
+
+        return .{
+            .code = try std.fmt.allocPrint(
+                gen.arena,
+                "(try rt.translate(arena, {s}, .{{ .context = {s}, .id = {s}, .plural = {s}, .count = {s}, .values = &[_]rt.Placeholder{{{s} }} }}))",
+                .{
+                    catalogue,
+                    try zig_string(gen.arena, context),
+                    try zig_string(gen.arena, id),
+                    try zig_string(gen.arena, plural),
+                    if (count) |lowered| try std.fmt.allocPrint(gen.arena, "@as(?f64, {s})", .{lowered.code}) else "null",
+                    values.written(),
+                },
+            ),
+            .type = .string,
+        };
+    }
+
     /// `Publr.request`: the request the render was handed, as an item of the declared
     /// fields. A render handed none fails at the read.
     fn request_root(gen: *Generator) Error!Lowered {
@@ -5217,6 +5697,12 @@ const Generator = struct {
                 .item = gen.request,
             },
         };
+    }
+
+    /// A local's name as Zig spells it: one that is a keyword or a primitive (`type`,
+    /// `error`) escaped (`@"type"`), so a list's `(type) => ...` lowers as written.
+    fn local_name(gen: *Generator, name: []const u8) Error![]const u8 {
+        return std.fmt.allocPrint(gen.arena, "{f}", .{std.zig.fmtId(name)}) catch error.OutOfMemory;
     }
 
     fn reference(gen: *Generator, name: []const u8, source: compiler.ReferenceSource) Error!Lowered {
@@ -5276,7 +5762,7 @@ const Generator = struct {
                     }
                 }
 
-                if (gen.foreign) |foreign| {
+                for (gen.foreigns) |foreign| {
                     if (foreign.state_local) |state| {
                         if (std.mem.eql(u8, state, name)) {
                             return .{
@@ -5517,6 +6003,9 @@ const Generator = struct {
         if (alternate.type == .union_value and consequent.type == .string) {
             alternate = try gen.union_as_string(alternate);
         }
+        // One arm from the engine: the other becomes a value too.
+        if (consequent.type == .value and alternate.type != .value) alternate = try gen.as_value(alternate);
+        if (alternate.type == .value and consequent.type != .value) consequent = try gen.as_value(consequent);
         const tag_a = std.meta.activeTag(consequent.type);
         const tag_b = std.meta.activeTag(alternate.type);
 
@@ -5576,12 +6065,6 @@ const Generator = struct {
 
     /// `` `/post/${slug}` `` → `try std.fmt.allocPrint(arena, "/post/{s}", .{slug})`.
     fn template(gen: *Generator, e: *const ExpressionIR) Error!Lowered {
-        return (try gen.template_with(e, false)).?;
-    }
-
-    /// The template with each part lowered as its SSR initial when `own`
-    /// (null when a part has none the server can render).
-    fn template_with(gen: *Generator, e: *const ExpressionIR, own: bool) Error!?Lowered {
         var format: std.Io.Writer.Allocating = .init(gen.arena);
         var arguments: std.Io.Writer.Allocating = .init(gen.arena);
 
@@ -5600,12 +6083,7 @@ const Generator = struct {
                 .expression => |part_expr| part_expr,
             };
 
-            const lowered = if (own) switch ((try gen.own_initial(part_expr)) orelse OwnInitial{
-                .lowered = try gen.expression(part_expr),
-            }) {
-                .lowered => |initial| initial,
-                .unservable => return null,
-            } else try gen.expression(part_expr);
+            const lowered = try gen.expression(part_expr);
 
             switch (lowered.type) {
                 .string => try format.writer.writeAll("{s}"),
@@ -5654,6 +6132,7 @@ const Generator = struct {
             .enumeration => try std.fmt.allocPrint(gen.arena, "(@tagName({s}).len != 0)", .{lowered.code}),
             .array, .strings, .item => "true",
             .null => "false",
+            .value => try std.fmt.allocPrint(gen.arena, "rt.value_truthy({s})", .{lowered.code}),
             .action_name, .finite_map, .finite, .state_root, .ref_name, .union_value, .union_typeof => gen.fail("a {s} has no truthiness", .{@tagName(lowered.type)}),
         };
     }
@@ -5819,6 +6298,132 @@ fn constant_index(property: compiler.MemberProperty) ?i64 {
     }
 }
 
+/// The list a chain of array methods that keep the item type starts from
+/// (`state.items.filter(…).slice(0, 3)` → `state.items`); null for anything else.
+fn array_base(e: *const ExpressionIR) ?*const ExpressionIR {
+    var current = e;
+    var methods: u32 = 0;
+    while (current.* == .call and current.call.callee.* == .member) {
+        const member = current.call.callee.member;
+        if (member.property != .string) break;
+        const keeps = for ([_][]const u8{ "filter", "slice", "toSorted", "toReversed", "concat" }) |method| {
+            if (std.mem.eql(u8, method, member.property.string)) break true;
+        } else false;
+        if (!keeps) break;
+        current = member.object;
+        methods += 1;
+    }
+    return if (methods > 0) current else null;
+}
+
+/// The name a state member chain starts from: `library` in `library.items.length`.
+fn state_root_name(e: *const ExpressionIR) ?[]const u8 {
+    var current = e;
+    while (current.* == .member) current = current.member.object;
+    return if (current.* == .reference) current.reference.name else null;
+}
+
+/// Whether every value of a style object is a literal string.
+fn style_is_literal(e: *const ExpressionIR) bool {
+    for (e.object.fields) |field| {
+        if (string_of_literal(field.value) == null) return false;
+    }
+    return true;
+}
+
+/// A style key as CSS: camelCase kebab-cased, a `--custom` property as it is.
+fn style_name(arena: std.mem.Allocator, name: []const u8) Error![]const u8 {
+    if (std.mem.startsWith(u8, name, "--")) return name;
+    var out: std.Io.Writer.Allocating = .init(arena);
+    for (name) |char| {
+        if (char >= 'A' and char <= 'Z') {
+            try out.writer.writeByte('-');
+            try out.writer.writeByte(char + ('a' - 'A'));
+        } else {
+            try out.writer.writeByte(char);
+        }
+    }
+    return out.written();
+}
+
+/// Whether `e` only reads a value: a literal, a name, or a member of one.
+fn is_read(e: *const ExpressionIR) bool {
+    return switch (e.*) {
+        .literal, .absent, .reference => true,
+        .member => |member| member.property != .expression and is_read(member.object),
+        else => false,
+    };
+}
+
+/// `Publr.t`, `Publr.tn`, `Publr.tx`: a message in the reader's language.
+const Translation = enum { t, tn, tx };
+
+fn translation_of(callee: *const ExpressionIR) ?Translation {
+    if (callee.* != .member) return null;
+    const member = callee.member;
+    if (member.property != .string or member.object.* != .reference) return null;
+    if (!std.mem.eql(u8, member.object.reference.name, "Publr")) return null;
+    return std.meta.stringToEnum(Translation, member.property.string);
+}
+
+/// Whether `e` reads `Publr.request`, which the engine's scope does not carry.
+fn reads_request(e: *const ExpressionIR) bool {
+    return switch (e.*) {
+        .member => |member| (member.property == .string and std.mem.eql(u8, member.property.string, "request") and
+            member.object.* == .reference and std.mem.eql(u8, member.object.reference.name, "Publr")) or
+            reads_request(member.object) or (member.property == .expression and reads_request(member.property.expression)),
+        .unary => |unary| reads_request(unary.argument),
+        .operation => |operation| reads_request(operation.left) or reads_request(operation.right),
+        .conditional => |conditional| reads_request(conditional.@"test") or reads_request(conditional.consequent) or reads_request(conditional.alternate),
+        .call => |call| blk: {
+            // A message reads the request's catalogue.
+            if (translation_of(call.callee) != null) break :blk true;
+            if (reads_request(call.callee)) break :blk true;
+            for (call.arguments) |argument| if (reads_request(argument)) break :blk true;
+            break :blk false;
+        },
+        .template => |template| blk: {
+            for (template.parts) |part| if (part == .expression and reads_request(part.expression)) break :blk true;
+            break :blk false;
+        },
+        .array => |array| blk: {
+            for (array.items) |item| if (reads_request(item)) break :blk true;
+            break :blk false;
+        },
+        .object => |object| blk: {
+            for (object.fields) |field| if (reads_request(field.value)) break :blk true;
+            break :blk false;
+        },
+        .function => |function| reads_request(function.body),
+        else => false,
+    };
+}
+
+/// Whether `e` reads a shared store (`Publr.stores.name…`).
+fn reads_publr_stores(e: *const ExpressionIR) bool {
+    switch (e.*) {
+        .member => |member| {
+            if (member.property == .string and std.mem.eql(u8, member.property.string, "stores") and
+                member.object.* == .reference and std.mem.eql(u8, member.object.reference.name, "Publr")) return true;
+            return reads_publr_stores(member.object);
+        },
+        .unary => |unary| return reads_publr_stores(unary.argument),
+        .operation => |operation| return reads_publr_stores(operation.left) or reads_publr_stores(operation.right),
+        .conditional => |conditional| return reads_publr_stores(conditional.@"test") or
+            reads_publr_stores(conditional.consequent) or reads_publr_stores(conditional.alternate),
+        .call => |call| {
+            if (reads_publr_stores(call.callee)) return true;
+            for (call.arguments) |argument| if (reads_publr_stores(argument)) return true;
+            return false;
+        },
+        .template => |template| {
+            for (template.parts) |part| if (part == .expression and reads_publr_stores(part.expression)) return true;
+            return false;
+        },
+        else => return false,
+    }
+}
+
 fn is_map_call(e: *const ExpressionIR) bool {
     if (e.* != .call) return false;
     const callee = e.call.callee;
@@ -5851,7 +6456,7 @@ fn test_lower(arena: std.mem.Allocator, sources: []const [2][]const u8, which: [
         try irs.append(arena, try compiler.createPjsxModule(arena, pair[1], pair[0]));
     }
     const program = try Program.init(arena, irs.items);
-    return program.lower(arena, which);
+    return program.listing(arena, which);
 }
 
 test "zig_string escapes quotes, backslashes, newlines and control bytes" {
@@ -5953,12 +6558,12 @@ test "a small module lowers: props struct, escaped text, loop, conditional, comp
     try std.testing.expect(std.mem.indexOf(u8, source, "for (props.posts) |post| {") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, "allocPrint(arena, \"/post/{s}\", .{ post.slug, })") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, "try rt.escape(w, post.slug);") != null);
-    try std.testing.expect(std.mem.indexOf(u8, source, "try Layout.render(w, arena, .{ .title = \"Hi\", .publr_request = props.publr_request, .publr_show = props.publr_show, .publr_show_wire = props.publr_show_wire, .publr_text_wire = props.publr_text_wire, .children = rt.block(&children_1, Children_1) });") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "try Layout.render(w, arena, .{ .title = \"Hi\", .publr_request = props.publr_request, .publr_prototype = props.publr_prototype, .publr_family = props.publr_family, .publr_show = props.publr_show, .publr_show_wire = props.publr_show_wire, .publr_text_wire = props.publr_text_wire, .children = rt.block(&children_1, Children_1) });") != null);
 
     const layout_source = try test_lower(arena, &sources, "Layout");
     try std.testing.expect(std.mem.indexOf(u8, layout_source, "children: ?rt.Node = null,") != null);
     try std.testing.expect(std.mem.indexOf(u8, layout_source, "try rt.escape(w, props.title);") != null);
-    try std.testing.expect(std.mem.indexOf(u8, layout_source, "try value_1.render_with(w, arena, props.publr_request);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, layout_source, "try value_1.render_in(w, arena, props.publr_request, props.publr_family);") != null);
 }
 
 test "an unsupported construct fails with a message naming the module and construct" {
@@ -6054,16 +6659,17 @@ test "a family root carries its store; parts wire to it through imports" {
 
     const part = try test_lower(arena, &sources, "Part");
     try std.testing.expect(std.mem.indexOf(u8, part, "aria-expanded=\\\"false\\\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, part, "data-p-bind=\\\"data-open:$values contains @value;aria-expanded:$open\\\"") != null or
-        std.mem.indexOf(u8, part, "data-p-bind=\\\"aria-expanded:$open;data-open:$values contains @value\\\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, part, "data-open:$e_Part_2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, part, "aria-expanded:$open") != null);
+    try std.testing.expect(std.mem.indexOf(u8, part, "// slot e_Part_2: ({ state }) => state.values.includes(Publr.dataset(\"value\"))") != null);
     try std.testing.expect(std.mem.indexOf(u8, part, "data-p-show=\\\"$open\\\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, part, "data-p-ref=\\\"panel\\\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, part, "data-p-portal") != null);
     try std.testing.expect(std.mem.indexOf(u8, part, "data-p-on=\\\"click:openDialog\\\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, part, "data-p-class=\\\"$open -&gt; font-medium\\\"") != null);
-    // The static class layer stays a plain attribute after the wire group
-    // moved out of the stack.
-    try std.testing.expect(std.mem.indexOf(u8, part, "class=\\\"flex\\\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, part, "data-p-class=\\\"$e_Part_3\\\"") != null);
+    // The static class layer stays in the stack, through the merge, after the wire group
+    // moved out of it.
+    try std.testing.expect(std.mem.indexOf(u8, part, "rt.write_merged(w, arena, &.{ \"flex\", })") != null);
 }
 
 test "events, wires and the store attribute lower to data-p-*" {
@@ -6213,7 +6819,7 @@ test "action props, Dynamic, finite maps, class stacks and aria booleans lower" 
     // Class merging uses the render arena even without another allocating expression.
     try std.testing.expect(std.mem.indexOf(u8, source, "_ = arena;") == null);
     // The class stack merges through the runtime; the finite map is a switch.
-    try std.testing.expect(std.mem.indexOf(u8, source, "try rt.write_merged(w, arena, &.{ \"inline-flex border\", (switch (props.size) { .@\"sm\" => \"h-8 px-2\", .@\"md\" => \"h-9 px-3\", }), props.classes, });") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "try rt.write_merged(w, arena, &.{ \"inline-flex border\", (if (props.publr_prototype and ((if (props.publr_bind_size != null) @as(?[]const u8, rt.concat(arena, &.{ \"$e_Button_2(\", \"size: \", rt.slot_argument(arena, props.publr_bind_size, props.size), \")\" })) else @as(?[]const u8, null))) != null) @as([]const u8, \"\") else (switch (props.size) { .@\"sm\" => \"h-8 px-2\", .@\"md\" => \"h-9 px-3\", })), props.classes, });") != null);
     // The action prop becomes a runtime wire; aria booleans serialize as text.
     try std.testing.expect(std.mem.indexOf(u8, source, "try rt.write_wire_attr(w, \"data-p-on\", &.{ .{ .prefix = \"click:\", .value = props.onClick }, });") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, "if (props.pressed) |value_") != null);
@@ -6254,7 +6860,8 @@ test "JSX own-state classes, window events and component refs lower without auth
     };
     const source = try test_lower(arena, &sources, "List");
     try std.testing.expect(std.mem.indexOf(u8, source, "if (props.busy)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, source, "$busy -&gt; busy ~ idle") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "data-p-class=\\\"$e_List_1\\\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "// slot e_List_1: () => (state.busy ? \"busy\" : \"idle\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, "popstate.window:go") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, ".name = \"data-p-ref\", .value = \"control\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, ".name = \"data-p-on\", .value = \"click:go\"") != null);
@@ -6300,4 +6907,235 @@ test "JSX HTML regions preserve null fallbacks and render initial trusted HTML a
     try std.testing.expect(std.mem.indexOf(u8, source, "<em>Ready</em>") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, "&lt;em&gt;") == null);
     try std.testing.expect(std.mem.indexOf(u8, source, "data-p-focus") != null);
+}
+
+test "with an engine, a live expression's first value is run on the server" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const module = try compiler.createPjsxModule(arena,
+        \\import { Publr } from "publr-jsx";
+        \\const TONES: Record<string, string> = { a: "text-a" };
+        \\export const state = Publr.reactive({ items: [] as { tone: string }[], open: false });
+        \\export function Panel({ items, label }: { items: { tone: string }[]; label: string }) {
+        \\  state.items = items;
+        \\  return <ul hidden={!state.open && state.items.length === 0} title={`${label}: ${state.items.length}`}>
+        \\    {state.items.map((item) => <li class={TONES[item.tone] ?? "text-b"}>{item.tone}</li>)}
+        \\  </ul>;
+        \\}
+    , "Panel.ptsx");
+    var program = try Program.init(arena, &.{module});
+    program.request = &.{.{
+        .name = "path",
+        .type = .string,
+        .zig_type = "[]const u8",
+        .default = null,
+    }};
+    program.expressions_field = "publr_expressions";
+    const code = program.lower(arena, "Panel") catch |e| {
+        std.debug.print("\n{s}\n", .{err.message()});
+        return e;
+    };
+    try std.testing.expect(std.mem.indexOf(u8, code, "var publr_state_held = rt.instance(.{ .items = props.items, .open = rt.Json{ .text = \"false\" }, }, .{ .label = props.label, });") != null);
+    try std.testing.expect(std.mem.indexOf(u8, code, "rt.evaluate((if (props.publr_request) |publr_request| @as(*const Request, @ptrCast(@alignCast(publr_request))).publr_expressions else null), arena, \"Panel\", \"e_Panel_3\", (try publr_state.text(arena)), .{ })") != null);
+    // A row the render draws hands its value to the scope.
+    try std.testing.expect(std.mem.indexOf(u8, code, "(try publr_state.text(arena)), .{ .item = item, })") != null);
+    const server = try program.serverFile(arena);
+    try std.testing.expect(std.mem.indexOf(u8, server, "  Panel: (state) => {\nconst TONES = { a: \"text-a\" };\nreturn {\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, server, "globalThis.__publr_table") != null);
+}
+
+test "with an engine, a part in another file draws its family root's state on the server" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const root = try compiler.createPjsxModule(arena,
+        \\import { Publr } from "publr-jsx";
+        \\export const state = Publr.reactive({ folder: "", items: [] as { title: string }[] });
+        \\export function Library({ folder = "", items = [], children }: { folder?: string; items?: { title: string }[]; children?: JSX.Element }) {
+        \\  state.folder = folder;
+        \\  state.items = items;
+        \\  return <div>{children}</div>;
+        \\}
+    , "Library.ptsx");
+    const part = try compiler.createPjsxModule(arena,
+        \\import { state } from "./Library.ptsx";
+        \\export function LibraryGrid() {
+        \\  return <ul data-current={state.folder === ""}>
+        \\    {state.items.map((item) => <li>{item.title}</li>)}
+        \\  </ul>;
+        \\}
+    , "LibraryGrid.ptsx");
+    var program = try Program.init(arena, &.{ root, part });
+    program.request = &.{.{
+        .name = "path",
+        .type = .string,
+        .zig_type = "[]const u8",
+        .default = null,
+    }};
+    program.expressions_field = "publr_expressions";
+    const root_code = program.lower(arena, "Library") catch |e| {
+        std.debug.print("\n{s}\n", .{err.message()});
+        return e;
+    };
+    // The root hands its state down: to its children as they render, and to every call.
+    try std.testing.expect(std.mem.indexOf(u8, root_code, "var publr_family_held = rt.family_of(\"library\", publr_state, props.publr_family);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, root_code, "render_in(w, arena, props.publr_request, publr_family);") != null);
+    const part_code = program.lower(arena, "LibraryGrid") catch |e| {
+        std.debug.print("\n{s}\n", .{err.message()});
+        return e;
+    };
+    // A field it reads runs over the nearest root's state, else the store's initials.
+    try std.testing.expect(std.mem.indexOf(u8, part_code, "(try rt.family_state(arena, props.publr_family, \"library\", \"{\\\"folder\\\":\\\"\\\",\\\"items\\\":[]}\"))") != null);
+    // A list it reads draws its rows, typed as the root's prop that seeds it.
+    try std.testing.expect(std.mem.indexOf(u8, part_code, "else try rt.value_into(@FieldType(Library.Props, \"items\"), arena,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, part_code, "const Library = @import(\"Library.zig\");") != null);
+}
+
+test "with an engine, a static expression the render cannot lower is the engine's" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const module = try compiler.createPjsxModule(arena,
+        \\const shout = (text: string) => text.toUpperCase() + "!";
+        \\export function Label({ text, small }: { text: string; small: boolean }) {
+        \\  return <span class={small ? "text-xs" : "text-sm"} title={shout(text)}>{text}</span>;
+        \\}
+    , "Label.ptsx");
+    var program = try Program.init(arena, &.{module});
+    program.request = &.{.{
+        .name = "path",
+        .type = .string,
+        .zig_type = "[]const u8",
+        .default = null,
+    }};
+    program.expressions_field = "publr_expressions";
+    const code = try program.lower(arena, "Label");
+    // The render lowers the ternary itself; the call is the engine's.
+    try std.testing.expect(std.mem.indexOf(u8, code, "(if (props.small) \"text-xs\" else \"text-sm\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, code, "rt.write_value_attribute(w, \"title\", (try rt.evaluate(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, code, "var publr_state_held = rt.instance(.{ }, .{ .text = props.text, });") != null);
+    const server = try program.serverFile(arena);
+    try std.testing.expect(std.mem.indexOf(u8, server, "const shout = (text) => text.toUpperCase() + \"!\";") != null);
+    try std.testing.expect(std.mem.indexOf(u8, server, "({ text }) => shout(text)") != null);
+}
+
+test "a slot that calls an intrinsic takes its JavaScript into the browser's stores" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const module = try compiler.createPjsxModule(arena,
+        \\import { Publr, initials } from "publr-jsx";
+        \\export const state = Publr.reactive({ name: "" });
+        \\export function Badge() { return <span>{initials(state.name)}</span>; }
+    , "Badge.ptsx");
+    const program = try Program.init(arena, &.{module});
+    _ = try program.lower(arena, "Badge");
+    const stores = try program.storesFile(arena);
+    try std.testing.expect(std.mem.indexOf(u8, stores, "const initials = (name) =>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stores, "e_Badge_1: () => initials(state.name)") != null);
+}
+
+test "with an engine, a list a computation makes draws its rows from the engine's answer" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const module = try compiler.createPjsxModule(arena,
+        \\import { Publr } from "publr-jsx";
+        \\type Item = { label: string; on: boolean };
+        \\export const state = Publr.reactive({ items: [] as Item[] });
+        \\export function Picks({ items, rows }: { items: Item[]; rows: Item[] }) {
+        \\  state.items = items;
+        \\  return <div>
+        \\    <ul>{state.items.filter((item) => item.on).map((item) => <li key={item.label}>{item.label}</li>)}</ul>
+        \\    <ol>{rows.filter((row) => !row.on).map((row) => <li>{row.label}</li>)}</ol>
+        \\  </div>;
+        \\}
+    , "Picks.ptsx");
+    var program = try Program.init(arena, &.{module});
+    program.request = &.{.{
+        .name = "path",
+        .type = .string,
+        .zig_type = "[]const u8",
+        .default = null,
+    }};
+    program.expressions_field = "publr_expressions";
+    const code = program.lower(arena, "Picks") catch |e| {
+        std.debug.print("\n{s}\n", .{err.message()});
+        return e;
+    };
+    // The browser's list is the slot; the server's rows are its answer, typed as the state's.
+    try std.testing.expect(std.mem.indexOf(u8, code, "data-p-for=\\\"item of $e_Picks_1\\\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, code, "(try rt.value_into(@TypeOf(props.items), arena, (try rt.evaluate(") != null);
+    // A list over props the render cannot filter is the engine's too.
+    try std.testing.expect(std.mem.indexOf(u8, code, "(try rt.value_into(@TypeOf(props.rows), arena, (try rt.evaluate(") != null);
+}
+
+test "an unseeded state field cast to a string union fills an enum prop with its initial" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const grid = try compiler.createPjsxModule(arena,
+        \\export function Grid({ size = "md" }: { size?: "sm" | "md" | "lg" }) {
+        \\  return <div data-size={size} />;
+        \\}
+    , "Grid.ptsx");
+    const picker = try compiler.createPjsxModule(arena,
+        \\import { Publr } from "publr-jsx";
+        \\import { Grid } from "./Grid.ptsx";
+        \\export const state = Publr.reactive({ tile_size: "lg" as "sm" | "md" | "lg" });
+        \\export function Picker() {
+        \\  return <div><Grid size={state.tile_size} /></div>;
+        \\}
+    , "Picker.ptsx");
+    var program = try Program.init(arena, &.{ grid, picker });
+    const code = program.lower(arena, "Picker") catch |e| {
+        std.debug.print("\n{s}\n", .{err.message()});
+        return e;
+    };
+    try std.testing.expect(std.mem.indexOf(u8, code, ".size = .@\"lg\"") != null);
+}
+
+test "a style object is written inside the element's tag, not before it" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const module = try compiler.createPjsxModule(arena,
+        \\export function Dot({ tone = "red" }: { tone?: string }) {
+        \\  return <p><span class="dot" style={{ left: "calc(1px + 2px)" }} title={tone}></span><i style={{ color: tone }}></i></p>;
+        \\}
+    , "Dot.ptsx");
+    var program = try Program.init(arena, &.{module});
+    const code = program.lower(arena, "Dot") catch |e| {
+        std.debug.print("\n{s}\n", .{err.message()});
+        return e;
+    };
+    try std.testing.expect(std.mem.indexOf(u8, code, "<span") != null);
+    const tag = std.mem.indexOf(u8, code, "<span").?;
+    const style = std.mem.indexOf(u8, code, "style=\\\"left:calc(1px + 2px)").?;
+    try std.testing.expect(style > tag);
+    const italic = std.mem.indexOf(u8, code, "<i").?;
+    const color = std.mem.indexOf(u8, code, "\"style\", try rt.style_text").?;
+    try std.testing.expect(color > italic);
+}
+
+test "the same enum shape at two depths gets two type names" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const module = try compiler.createPjsxModule(arena,
+        \\export type ShelfProps = {
+        \\  files: Array<{ icon: "a" | "b" }>;
+        \\  parts: Array<{ files: Array<{ icon: "a" | "b" }> }>;
+        \\  cells: Array<{ files: Array<{ icon: "a" | "b" }> }>;
+        \\};
+        \\export function Shelf({ files, parts, cells }: ShelfProps) {
+        \\  return <p data-count={`${files.length}${parts.length}${cells.length}`}></p>;
+        \\}
+    , "Shelf.ptsx");
+    var program = try Program.init(arena, &.{module});
+    _ = program.lower(arena, "Shelf") catch |e| {
+        std.debug.print("\n{s}\n", .{err.message()});
+        return e;
+    };
 }
