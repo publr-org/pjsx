@@ -365,6 +365,25 @@ test "a family root that reads another family's state finds that family's island
     try expectMatch(registration.code, "const disclosure = above\\(\"disclosure\"\\);", "");
 }
 
+test "an object key or member name spelling a prop does not seed state from it" {
+    var arena = Arena.init();
+    defer arena.deinit();
+    const listing_source =
+        \\import { Publr } from "publr-jsx";
+        \\export const state = Publr.reactive({
+        \\  conditions: { search: "", filters: [] as string[] },
+        \\  seeded: { search },
+        \\});
+        \\export function Listing({ search, filters }: { search: string; filters: string[] }) {
+        \\  state.seeded = { search };
+        \\  return <span>{state.conditions.search}{filters.length}</span>;
+        \\}
+    ;
+    const registration = (lowerPjsxStoreRegistration(arena.a(), listing_source, "Listing.ptsx") catch |e| return report(e)).?;
+    try expectContains(registration.code, "conditions: { search: \"\", filters: [] as string[] }");
+    try expectContains(registration.code, "seeded: undefined");
+}
+
 test "DOM module objects remain ordinary shared exports" {
     var arena = Arena.init();
     defer arena.deinit();

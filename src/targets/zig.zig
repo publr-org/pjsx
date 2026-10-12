@@ -6435,6 +6435,8 @@ fn is_map_call(e: *const ExpressionIR) bool {
 fn contains_jsx(e: *const ExpressionIR) bool {
     return switch (e.*) {
         .node => true,
+        // `xs.map((x) => <…/>)` draws markup too: `{shown && xs.map(…)}` guards a list.
+        .call => is_map_call(e),
         .conditional => |value| contains_jsx(value.consequent) or contains_jsx(value.alternate),
         .operation => |value| contains_jsx(value.left) or contains_jsx(value.right),
         else => false,
@@ -6503,6 +6505,25 @@ test "array props are converted to the receiving component's item types" {
     };
     const source = try test_lower(arena, &sources, "Parent");
     try std.testing.expect(std.mem.indexOf(u8, source, "try rt.prop_array(@FieldType(Child.Props, \"options\"), arena, row.choices)") != null);
+}
+
+test "a guard over a mapped list lowers to an if around the loop" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const sources = [_][2][]const u8{.{
+        "Guarded.ptsx",
+        \\export const guardedProps = {
+        \\  shown: { type: "boolean" },
+        \\  options: { type: "array", fields: { label: { type: "string" } } },
+        \\};
+        \\export function Guarded({ shown, options }) {
+        \\  return <ul>{shown && options.map((option) => <li>{option.label}</li>)}</ul>;
+        \\}
+    }};
+    const source = try test_lower(arena, &sources, "Guarded");
+    try std.testing.expect(std.mem.indexOf(u8, source, "for (") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "if (") != null);
 }
 
 const test_layout_source =

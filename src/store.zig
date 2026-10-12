@@ -342,19 +342,33 @@ fn initialBoundProp(a: Allocator, node: *Node, bindings: *const Bindings) Alloca
     return null;
 }
 
+/// Whether an expression reads a bound prop anywhere. An object key (`{ search: "" }`) or a
+/// member name (`event.search`) is a name, not a read, even when it spells a prop.
 fn expressionReadsBoundProp(a: Allocator, node: *Node, bindings: *const Bindings) bool {
-    const Pred = struct {
-        a: Allocator,
-        bindings: *const Bindings,
-        fn check(self: @This(), candidate: *Node) bool {
-            const bound = boundPropName(self.a, candidate, self.bindings) catch return false;
-            return bound != null;
+    const bound = boundPropName(a, node, bindings) catch return false;
+    if (bound != null) return true;
+    switch (node.type) {
+        .Property => {
+            if (node.computed) if (node.key) |key| if (expressionReadsBoundProp(a, key, bindings)) return true;
+            return if (node.value_node) |value| expressionReadsBoundProp(a, value, bindings) else false;
+        },
+        .MemberExpression => {
+            if (node.object) |object| if (expressionReadsBoundProp(a, object, bindings)) return true;
+            if (!node.computed) return false;
+            return if (node.property) |property| expressionReadsBoundProp(a, property, bindings) else false;
+        },
+        else => {},
+    }
+    for (ast.childFields(node.type)) |child_field| {
+        if (child_field[1]) {
+            for (ast.getList(node, child_field[0])) |child| {
+                if (child) |found| if (expressionReadsBoundProp(a, found, bindings)) return true;
+            }
+        } else if (ast.getSingle(node, child_field[0])) |child| {
+            if (expressionReadsBoundProp(a, child, bindings)) return true;
         }
-    };
-    return ast.contains(node, Pred{
-        .a = a,
-        .bindings = bindings,
-    }, Pred.check);
+    }
+    return false;
 }
 
 pub fn reactivePropSeeds(a: Allocator, reactive: *const ReactiveBinding, bindings: *const Bindings) Error![]const ReactivePropSeed {
