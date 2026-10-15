@@ -1090,6 +1090,9 @@ const Generator = struct {
     seeded_depth: u32 = 0,
     templates: std.ArrayList(struct {
         expression: *const ExpressionIR,
+        /// A list's template and the guard around it (`{shown && xs.map(…)}`) are drawn
+        /// from the same expression: each has its own.
+        rows: bool,
         name: []const u8,
     }) = .empty,
     /// The item structs and enums of asserted array literals (`[] as Row[]`),
@@ -1108,6 +1111,10 @@ const Generator = struct {
     /// The expression whose static fallback is being lowered inside its own
     /// prop-wire branch, so it is not wired again there.
     prop_wire_skip: ?*const ExpressionIR = null,
+    /// Reads of the component's props, counted: a template whose body read one (in a
+    /// block passed to a child, too) draws differently for each caller, so it is written
+    /// each time, never once per page.
+    prop_reads: u32 = 0,
     /// Names for prop-wire temporaries, counted apart so the plain lowering's
     /// names do not depend on them.
     prop_counter: u32 = 0,
@@ -3027,27 +3034,16 @@ const Generator = struct {
     /// component's children do; `a && <X/>`, `a ? <X/> : <Y/>` and `a || b` choose between
     /// blocks, and an arm that renders nothing is null, so the callee sees it absent.
     fn node_value(gen: *Generator, e: *const ExpressionIR) Error!Lowered {
+        // A choice made on the island's state stays live in the browser: drawn as a block
+        // holding the choice, as a child's `{state.open ? <A/> : <B/>}` is, never decided
+        // here once. Such a block is always present, even when it draws nothing.
+        if (e.* != .node and gen.reads_state(e)) {
+            const holder = try gen.arena.create(NodeIR);
+            holder.* = .{ .expression = .{ .value = e } };
+            return gen.markup_block(holder);
+        }
         switch (e.*) {
-            .node => |node_expr| {
-                const capture = try gen.fresh("markup");
-                const body_type = try capitalize(gen.arena, capture);
-
-                try gen.block_struct(body_type, &.{node_expr.node});
-
-                var captured: std.Io.Writer.Allocating = .init(gen.arena);
-                try captured.writer.writeAll(" .props = &props,");
-                try captured.writer.print(" .publr_family = {s},", .{gen.family_code});
-                try gen.capture_state(&captured.writer);
-                for (gen.locals.items) |local| {
-                    try captured.writer.print(" .{s} = &{s},", .{ local.name, local.name });
-                }
-                gen.props_used = true;
-                try gen.line("const {s} = .{{{s} }};", .{ capture, captured.written() });
-                return .{
-                    .code = try std.fmt.allocPrint(gen.arena, "rt.block(&{s}, {s})", .{ capture, body_type }),
-                    .type = .node,
-                };
-            },
+            .node => |node_expr| return gen.markup_block(node_expr.node),
             .conditional => |conditional| {
                 const test_code = try gen.truthy(try gen.expression(conditional.@"test"));
                 const consequent = try gen.optional_markup(conditional.consequent);
@@ -3088,6 +3084,75 @@ const Generator = struct {
                 };
             },
         }
+    }
+
+    /// Markup as a block over the props and locals in scope, as a component's children are.
+    fn markup_block(gen: *Generator, markup: *const NodeIR) Error!Lowered {
+        const capture = try gen.fresh("markup");
+        const body_type = try capitalize(gen.arena, capture);
+
+        try gen.block_struct(body_type, &.{markup});
+
+        var captured: std.Io.Writer.Allocating = .init(gen.arena);
+        try captured.writer.writeAll(" .props = &props,");
+        try captured.writer.print(" .publr_family = {s},", .{gen.family_code});
+        try gen.capture_state(&captured.writer);
+        for (gen.locals.items) |local| {
+            try captured.writer.print(" .{s} = &{s},", .{ local.name, local.name });
+        }
+        gen.props_used = true;
+        try gen.line("const {s} = .{{{s} }};", .{ capture, captured.written() });
+        return .{
+            .code = try std.fmt.allocPrint(gen.arena, "rt.block(&{s}, {s})", .{ capture, body_type }),
+            .type = .node,
+        };
+    }
+
+    /// Whether `e` reads the island's own state anywhere.
+    fn reads_state(gen: *const Generator, e: *const ExpressionIR) bool {
+        return switch (e.*) {
+            .reference => |referenced| gen.is_state_reference(referenced),
+            .member => |member| gen.reads_state(member.object) or
+                (member.property == .expression and gen.reads_state(member.property.expression)),
+            .unary => |unary| gen.reads_state(unary.argument),
+            .operation => |operation_ir| gen.reads_state(operation_ir.left) or gen.reads_state(operation_ir.right),
+            .conditional => |conditional| gen.reads_state(conditional.@"test") or
+                gen.reads_state(conditional.consequent) or gen.reads_state(conditional.alternate),
+            .chain => |chain| gen.reads_state(chain.expression),
+            .call => |call| blk: {
+                if (gen.reads_state(call.callee)) break :blk true;
+                for (call.arguments) |argument| {
+                    if (gen.reads_state(argument)) break :blk true;
+                }
+                break :blk false;
+            },
+            .template => |parts_of| blk: {
+                for (parts_of.parts) |part| {
+                    if (part == .expression and gen.reads_state(part.expression)) break :blk true;
+                }
+                break :blk false;
+            },
+            else => false,
+        };
+    }
+
+    fn is_state_reference(gen: *const Generator, referenced: compiler.ReferenceIR) bool {
+        if (referenced.source == .state) return true;
+        if (referenced.source != .local) return false;
+        for (gen.locals.items) |local| {
+            if (std.mem.eql(u8, local.source_name orelse local.name, referenced.name)) return false;
+        }
+        if (gen.module.wire) |wire| {
+            if (wire.state_name) |state| {
+                if (std.mem.eql(u8, state, referenced.name)) return true;
+            }
+        }
+        for (gen.foreigns) |foreign| {
+            if (foreign.state_local) |state| {
+                if (std.mem.eql(u8, state, referenced.name)) return true;
+            }
+        }
+        return false;
     }
 
     /// `node_value` as a `?rt.Node`, `null` for an arm that renders nothing.
@@ -3935,7 +4000,7 @@ const Generator = struct {
         defer gen.present_values.shrinkRetainingCapacity(present_count);
 
         try gen.static("<template data-p-template=\"");
-        try gen.static(try gen.template_id(body));
+        try gen.static(try gen.template_id(body, false));
         try gen.static("\" data-p-if=\"");
         try gen.line("try rt.escape({s}, {s});", .{ gen.writer_name, capture });
         try gen.static("\"");
@@ -3946,7 +4011,7 @@ const Generator = struct {
             gen.indent += 1;
             try gen.present_values.append(gen.arena, tested.code);
         }
-        try gen.template_body(try gen.template_id(body), false, body);
+        try gen.template_body(try gen.template_id(body, false), false, body);
         if (unwraps) {
             try gen.flush();
             gen.indent -= 1;
@@ -4037,7 +4102,7 @@ const Generator = struct {
             const anchor_only = gen.seeded_depth > 0 and gen.template_depth == 0;
             const body = function.function.body;
             try gen.static("<template data-p-template=\"");
-            try gen.static(try gen.template_id(e));
+            try gen.static(try gen.template_id(e, true));
             try gen.static("\" data-p-for");
             if (!anchor_only) {
                 try gen.static("=\"");
@@ -4058,7 +4123,7 @@ const Generator = struct {
             }
             try gen.static(">");
             if (!anchor_only) {
-                try gen.template_body(try gen.template_id(e), true, body);
+                try gen.template_body(try gen.template_id(e, true), true, body);
             }
             try gen.static("</template>");
             if (wired.own and gen.template_depth == 0) {
@@ -4264,7 +4329,7 @@ const Generator = struct {
         try gen.wire_aliases.append(gen.arena, parameter);
         defer _ = gen.wire_aliases.pop();
         try gen.static("<template data-p-template=\"");
-        try gen.static(try gen.template_id(e));
+        try gen.static(try gen.template_id(e, true));
         try gen.static("\" data-p-for=\"");
         try gen.static_escaped(parameter, true);
         try gen.static(" of ");
@@ -4282,7 +4347,7 @@ const Generator = struct {
             }
         }
         try gen.static(">");
-        try gen.template_body(try gen.template_id(e), true, body);
+        try gen.template_body(try gen.template_id(e, true), true, body);
         try gen.static("</template>");
         if (subject) |rows| try gen.seeded_rows(rows, function);
         try gen.flush();
@@ -4317,11 +4382,13 @@ const Generator = struct {
 
         try gen.flush();
         const start = gen.body.written().len;
+        const reads_before = gen.prop_reads;
         if (row) try gen.row_body(body) else try gen.branch_body(body);
         try gen.flush();
 
         const code = try gen.arena.dupe(u8, gen.body.written()[start..]);
 
+        if (gen.prop_reads != reads_before) return;
         if (!instance_free(code, gen.locals.items[0..outer_locals])) return;
 
         gen.body.shrinkRetainingCapacity(start);
@@ -4345,13 +4412,14 @@ const Generator = struct {
         return try std.fmt.allocPrint(gen.arena, "(if (props.publr_request) |publr_request| @as(*const Request, @ptrCast(@alignCast(publr_request))).{s} else null)", .{gen.templates_field});
     }
 
-    fn template_id(gen: *Generator, expr: *const ExpressionIR) Error![]const u8 {
+    fn template_id(gen: *Generator, expr: *const ExpressionIR, rows: bool) Error![]const u8 {
         for (gen.templates.items) |entry| {
-            if (entry.expression == expr) return entry.name;
+            if (entry.expression == expr and entry.rows == rows) return entry.name;
         }
         const name = try std.fmt.allocPrint(gen.arena, "{s}-{d}", .{ gen.module.name, gen.templates.items.len });
         try gen.templates.append(gen.arena, .{
             .expression = expr,
+            .rows = rows,
             .name = name,
         });
         return name;
@@ -4363,7 +4431,7 @@ const Generator = struct {
         // under that id, so the row does not repeat it.
         const in_row = gen.seeded_depth > 0 and gen.template_depth == 0;
         try gen.static("<template data-p-template=\"");
-        try gen.static(try gen.template_id(body));
+        try gen.static(try gen.template_id(body, false));
         try gen.static("\" data-p-if");
         if (!in_row) {
             try gen.static("=\"");
@@ -4373,7 +4441,7 @@ const Generator = struct {
         if (inverse) try gen.static(" data-p-if-not");
         try gen.static(">");
         if (!in_row) {
-            try gen.template_body(try gen.template_id(body), false, body);
+            try gen.template_body(try gen.template_id(body, false), false, body);
         }
         try gen.static("</template>");
         if (!wired.own or gen.template_depth > 0) return;
@@ -4592,6 +4660,7 @@ const Generator = struct {
                     if (util.containsString(parameters.items, name)) continue;
                     const field = find_field(gen.module.props, name) orelse return gen.fail("prop \"{s}\" is not declared", .{name});
                     gen.props_used = true;
+                    gen.prop_reads += 1;
                     try parameters.append(gen.arena, name);
                     try arguments.append(gen.arena, .{
                         .name = name,
@@ -5205,6 +5274,7 @@ const Generator = struct {
             const field = find_field(gen.module.props, e.reference.name) orelse return null;
             if (!field.bind_transport) return null;
             gen.props_used = true;
+            gen.prop_reads += 1;
             return try std.fmt.allocPrint(gen.arena, "props.publr_bind_{s}", .{e.reference.name});
         }
         const call = (try gen.slot_call(e)) orelse return null;
@@ -5713,6 +5783,7 @@ const Generator = struct {
                     return gen.fail("reference to undeclared prop \"{s}\"", .{name});
                 };
                 gen.props_used = true;
+                gen.prop_reads += 1;
                 return .{
                     .code = try std.fmt.allocPrint(gen.arena, "props.{f}", .{std.zig.fmtId(name)}),
                     .type = prop.type,
@@ -6111,6 +6182,13 @@ const Generator = struct {
         };
     }
 
+    /// The call that tests a node for emptiness: on a page writing each template once,
+    /// one that leaves the templates it meets unwritten.
+    fn emptiness(gen: *Generator) Error![]const u8 {
+        const templates = (try gen.templates_code()) orelse return "is_empty(arena)";
+        return try std.fmt.allocPrint(gen.arena, "is_empty_in(arena, {s})", .{templates});
+    }
+
     /// The JavaScript truthiness of a lowered value as a Zig `bool`.
     fn truthy(gen: *Generator, lowered: Lowered) Error![]const u8 {
         return switch (lowered.type) {
@@ -6119,7 +6197,7 @@ const Generator = struct {
             .opt_string => try std.fmt.allocPrint(gen.arena, "(if ({s}) |value| value.len != 0 else false)", .{lowered.code}),
             .opt_node => blk: {
                 gen.arena_used = true;
-                break :blk try std.fmt.allocPrint(gen.arena, "(if ({s}) |value| !value.is_empty(arena) else false)", .{lowered.code});
+                break :blk try std.fmt.allocPrint(gen.arena, "(if ({s}) |value| !value.{s} else false)", .{ lowered.code, try gen.emptiness() });
             },
             .opt_number => try std.fmt.allocPrint(gen.arena, "(if ({s}) |value| value != 0 and !std.math.isNan(value) else false)", .{lowered.code}),
             .opt_enumeration => try std.fmt.allocPrint(gen.arena, "(if ({s}) |value| @tagName(value).len != 0 else false)", .{lowered.code}),
@@ -6128,7 +6206,7 @@ const Generator = struct {
             .string => try std.fmt.allocPrint(gen.arena, "({s}.len != 0)", .{lowered.code}),
             .node => blk: {
                 gen.arena_used = true;
-                break :blk try std.fmt.allocPrint(gen.arena, "(!{s}.is_empty(arena))", .{lowered.code});
+                break :blk try std.fmt.allocPrint(gen.arena, "(!{s}.{s})", .{ lowered.code, try gen.emptiness() });
             },
             .enumeration => try std.fmt.allocPrint(gen.arena, "(@tagName({s}).len != 0)", .{lowered.code}),
             .array, .strings, .item => "true",
@@ -6887,6 +6965,75 @@ test "JSX own-state classes, window events and component refs lower without auth
     try std.testing.expect(std.mem.indexOf(u8, source, "popstate.window:go") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, ".name = \"data-p-ref\", .value = \"control\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, ".name = \"data-p-on\", .value = \"click:go\"") != null);
+}
+
+test "a template drawing a prop through a child's children is written for each caller" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const label = try compiler.createPjsxModule(arena,
+        \\export function Label({ children }: { children?: JSX.Element }) { return <span>{children}</span>; }
+    , "Label.ptsx");
+    const pill = try compiler.createPjsxModule(arena,
+        \\import { Label } from "./Label.ptsx";
+        \\export function Pill({ detail = "" }: { detail?: string }) {
+        \\  return <div>{detail !== "" && <Label>{detail}</Label>}</div>;
+        \\}
+    , "Pill.ptsx");
+    var program = try Program.init(arena, &.{ label, pill });
+    program.request = &.{.{
+        .name = "templates",
+        .type = .string,
+        .zig_type = "[]const u8",
+        .default = null,
+    }};
+    program.templates_field = "templates";
+    const code = try program.lower(arena, "Pill");
+    try std.testing.expect(std.mem.indexOf(u8, code, "data-p-template=\\\"Pill-0\\\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, code, "rt.first_template(") == null);
+}
+
+test "a guarded list and its guard are two templates" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const sources = [_][2][]const u8{.{
+        "Rows.ptsx",
+        \\import { Publr } from "publr/dom";
+        \\export const state = Publr.reactive({ open: false, items: [] as string[] });
+        \\export const rowsProps = {} as const;
+        \\export function Rows() {
+        \\  return <div>{state.open && state.items.map((item) => <i>{item}</i>)}</div>;
+        \\}
+    }};
+    const source = try test_lower(arena_state.allocator(), &sources, "Rows");
+    try std.testing.expect(std.mem.indexOf(u8, source, "data-p-template=\\\"Rows-0\\\" data-p-if") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "data-p-template=\\\"Rows-1\\\" data-p-for") != null);
+}
+
+test "a node prop chosen on the island's state stays a live choice" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const sources = [_][2][]const u8{
+        .{
+            "Panel.ptsx",
+            \\export type PanelProps = { footer?: JSX.Element };
+            \\export function Panel({ footer }: PanelProps) { return <section>{footer}</section>; }
+        },
+        .{
+            "Chat.ptsx",
+            \\import { Publr } from "publr/dom";
+            \\import { Panel } from "./Panel.ptsx";
+            \\export const state = Publr.reactive({ live: false });
+            \\export const chatProps = {} as const;
+            \\export function Chat() {
+            \\  return <div><Panel footer={state.live ? <b>Working</b> : <i>Reply</i>} /></div>;
+            \\}
+        },
+    };
+    const source = try test_lower(arena, &sources, "Chat");
+    try std.testing.expect(std.mem.indexOf(u8, source, "rt.block(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "data-p-if=\\\"$live\\\" data-p-if-not") != null);
 }
 
 test "shared JSX state, keyed rows and actions lower without a local state owner" {

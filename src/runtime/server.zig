@@ -93,7 +93,19 @@ pub const Node = struct {
     /// The JavaScript truthiness of a node: whether it renders anything. A raw
     /// string knows; a block renders once into a counting sink to find out.
     pub fn is_empty(node: Node, arena: std.mem.Allocator) bool {
+        return node.is_empty_in(arena, null);
+    }
+
+    /// `is_empty` on a page writing each template once (`templates`): the probe writes
+    /// every prototype it meets without counting it as written, so the real render
+    /// still writes it.
+    pub fn is_empty_in(node: Node, arena: std.mem.Allocator, templates: ?*anyopaque) bool {
         if (node.raw) |html| return html.len == 0;
+        const set: ?*Templates = @ptrCast(@alignCast(templates));
+        if (set) |probing| probing.probing += 1;
+        defer if (set) |probing| {
+            probing.probing -= 1;
+        };
         var probe: std.Io.Writer.Discarding = .init(&.{});
         node.render(&probe.writer, arena) catch return false;
         return probe.count + probe.writer.end == 0;
@@ -183,6 +195,31 @@ test "a block node streams into the writer it is given and knows when it is empt
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     try std.testing.expectEqualStrings("<b>a &amp; b</b>", try render_to_string(arena_state.allocator(), node));
+}
+
+test "a node tested for emptiness leaves its templates for the real render" {
+    const Body = struct {
+        fn render(cap: anytype, w: *std.Io.Writer, arena: std.mem.Allocator, family: ?*const Family) !void {
+            _ = arena;
+            _ = family;
+            if (first_template(cap.templates, "Pill-0")) try w.writeAll("<button>Send</button>");
+        }
+    };
+    var templates: Templates = .{
+        .gpa = std.testing.allocator,
+    };
+    defer templates.deinit();
+    const capture = .{
+        .templates = @as(?*anyopaque, &templates),
+    };
+    const node = block(&capture, Body);
+    try std.testing.expect(!node.is_empty_in(std.testing.allocator, &templates));
+    try std.testing.expectEqual(@as(u32, 0), templates.probing);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try node.render(&out.writer, std.testing.allocator);
+    try std.testing.expectEqualStrings("<button>Send</button>", out.written());
+    try std.testing.expect(!first_template(&templates, "Pill-0"));
 }
 
 /// Array schemas are structural in PJSX; generated Zig modules own distinct
@@ -417,6 +454,8 @@ pub fn write_merged_in(
 pub const Templates = struct {
     gpa: std.mem.Allocator,
     written: std.StringHashMapUnmanaged(void) = .empty,
+    /// Above zero while a node renders only to learn whether it is empty.
+    probing: u32 = 0,
 
     pub fn deinit(templates: *Templates) void {
         templates.written.deinit(templates.gpa);
@@ -429,6 +468,7 @@ pub fn first_template(templates: ?*anyopaque, id: []const u8) bool {
     std.debug.assert(id.len > 0);
 
     const set: *Templates = @ptrCast(@alignCast(templates orelse return true));
+    if (set.probing > 0) return true;
     const slot = set.written.getOrPut(set.gpa, id) catch return true;
 
     return !slot.found_existing;

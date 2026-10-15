@@ -143,6 +143,28 @@ const Transform = struct {
             });
         }
     }
+    /// Whether an assignment pattern writes a reactive binding or an iteration parameter.
+    fn patternWritesReactive(node: *Node, env: *Env) bool {
+        switch (node.type) {
+            .Identifier => {
+                const b = env.get(node.name) orelse return false;
+                return switch (b.kind) {
+                    .state, .derived, .awaited, .row, .repeat_index => true,
+                    else => false,
+                };
+            },
+            .MemberExpression => return false,
+            .AssignmentPattern => return patternWritesReactive(node.left.?, env),
+            .Property => return patternWritesReactive(node.value_node.?, env),
+            else => {},
+        }
+        for (ast.childFields(node.type)) |field| {
+            if (field[1]) {
+                for (ast.getList(node, field[0])) |child| if (child) |c| if (patternWritesReactive(c, env)) return true;
+            } else if (ast.getSingle(node, field[0])) |child| if (patternWritesReactive(child, env)) return true;
+        }
+        return false;
+    }
     fn reactiveBinding(node: *Node, env: *Env) ?Kind {
         if (node.type != .Identifier) return null;
         const b = env.get(node.name) orelse return null;
@@ -512,7 +534,10 @@ const Transform = struct {
             }
         }
         const kind = reactiveBinding(target, env) orelse {
-            if (target.type == .ObjectPattern or target.type == .ArrayPattern) return fail(target, "destructuring assignments are not supported in compiled modules");
+            // A pattern of ordinary variables assigns as JavaScript does; one that would
+            // write reactive state is refused (each element would need its own write).
+            if ((target.type == .ObjectPattern or target.type == .ArrayPattern) and patternWritesReactive(target, env))
+                return fail(target, "destructuring assignments to reactive bindings are not supported in compiled modules");
             return self.children(node, env);
         };
         if (kind != .state) return fail(target, "cannot assign to a derived or awaited binding");
@@ -607,6 +632,14 @@ test "declaration diagnostics reject silently incorrect forms" {
         "import {state} from 'publr'; const alias = state;",
         "import {state} from 'publr'; use(state(0));",
     }) |source| try std.testing.expectError(error.Pjsx, compile(arena.allocator(), source, "bad.ptsx", .{}));
+}
+
+test "destructuring assignments to ordinary variables pass through" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const source = "function f(c) { let r = 0; let g = 0; [r, g] = c; ({ r, g } = c); return r + g; }";
+    try std.testing.expectEqualStrings(source, try compile(arena.allocator(), source, "plain.ts", .{}));
+    try std.testing.expectError(error.Pjsx, compile(arena.allocator(), "import {state} from 'publr'; function f(c) { let n = state(0); [n] = c; }", "bad.ptsx", .{}));
 }
 
 test "ordinary spelling and shadowed intrinsics retain JavaScript meaning" {
