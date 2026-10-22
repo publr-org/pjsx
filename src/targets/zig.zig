@@ -5033,17 +5033,22 @@ const Generator = struct {
         const seeds = if (gen.module.wire) |wire| wire.seed_exprs else &.{};
         for (initials) |initial| {
             var value = initial.expr orelse continue;
+            var seeded = false;
             for (seeds) |seed| {
-                if (std.mem.eql(u8, seed.field, initial.field)) value = seed.expr;
+                if (std.mem.eql(u8, seed.field, initial.field)) {
+                    value = seed.expr;
+                    seeded = true;
+                }
             }
             // A constant is its JSON; anything else, the render's value.
             if (try expression_js.json(gen.arena, value)) |constant| {
                 try fields.writer.print(" .{f} = rt.Json{{ .text = {s} }},", .{ std.zig.fmtId(initial.field), try zig_string(gen.arena, constant) });
                 continue;
             }
-            // One the render cannot lower (a call of an imported helper) is the engine's,
-            // run before the state it starts exists.
-            const lowered: Lowered = gen.expression(value) catch switch (gen.server_value(value) catch continue) {
+            // An initial the render cannot lower (a call of an imported helper) is the
+            // engine's, run before the state it starts exists; a seed reads the props, which
+            // that run has not.
+            const lowered: Lowered = gen.expression(value) catch if (seeded) continue else switch (gen.server_value(value) catch continue) {
                 .lowered => |by_engine| by_engine,
                 .unservable => continue,
             };
