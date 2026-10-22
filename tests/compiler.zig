@@ -2070,3 +2070,38 @@ test "a live list's `.map((item, i) => …)` keeps each row's position in its st
     // The server's rows are numbered as the browser numbers them.
     try expectContains(code, "const i: f64 = @floatFromInt(");
 }
+
+test "a module-level state's initial calling an imported helper has its value on the server" {
+    var arena = Arena.init();
+    defer arena.deinit();
+    const a = arena.a();
+    const helper_source =
+        \\export const asked_in = (name: string): string => typeof window === "undefined" ? "" : name;
+        \\export function Waiting() { return <i>…</i>; }
+    ;
+    const tested_source =
+        \\import { Publr } from "publr-jsx";
+        \\import { asked_in } from "./Waiting.ptsx";
+        \\
+        \\export const state = Publr.reactive({ id: asked_in("tested") });
+        \\
+        \\export function Tested() {
+        \\  return <div>{state.id !== "" && <p>{state.id}</p>}</div>;
+        \\}
+    ;
+    var irs: std.ArrayList(*const compiler.ModuleIR) = .empty;
+    try irs.append(a, createPjsxModule(a, helper_source, "Waiting.ptsx", .{}) catch |e| return report(e));
+    try irs.append(a, createPjsxModule(a, tested_source, "Tested.ptsx", .{}) catch |e| return report(e));
+    var program = pjsx.targets.zig.Program.init(a, irs.items) catch |e| return report(e);
+    program.request = pjsx.targets.zig.requestFields(struct {
+        path: []const u8,
+    });
+    program.expressions_field = "publr_expressions";
+    const code = program.listing(a, "Tested") catch |e| return report(e);
+    const server = program.serverFile(a) catch |e| return report(e);
+
+    // The render starts its state with the engine's value, not without the field.
+    try expectContains(code, "rt.instance(.{ .id = (try rt.evaluate(");
+    // The server's program has the helper, as the browser's does.
+    try expectContains(server, "Tested: (state) => {\nconst asked_in = (name) =>");
+}

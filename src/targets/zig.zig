@@ -444,10 +444,39 @@ pub const Program = struct {
         for (program.modules) |module| {
             const slots = program.server_slots.get(module.name) orelse continue;
             if (slots.len == 0) continue;
-            try out.writer.print("{s}\n", .{try slots_file.serverModule(arena, module.name, slots, module.declarations)});
+            const declarations = try program.server_declarations(arena, module);
+            try out.writer.print("{s}\n", .{try slots_file.serverModule(arena, module.name, slots, declarations)});
         }
         try out.writer.writeAll(slots_file.server_run);
         return out.written();
+    }
+
+    /// The helpers a module's server slots may read: its own, then those of each module it
+    /// imports a helper from, as the browser has them (bound to no store), each under the
+    /// name it is imported as. A name of its own is never shadowed.
+    fn server_declarations(program: Program, arena: std.mem.Allocator, module: Module) Error![]const compiler.DeclarationIR {
+        var found: std.ArrayList(compiler.DeclarationIR) = .empty;
+        try found.appendSlice(arena, module.declarations);
+        for (module.imports) |import| {
+            const target = for (program.modules) |candidate| {
+                if (std.mem.eql(u8, candidate.file_stem, import.module)) break candidate;
+            } else continue;
+            const helper = for (target.declarations) |declaration| {
+                if (std.mem.eql(u8, declaration.name, import.imported) and !declaration.store_bound) break declaration;
+            } else continue;
+            for (target.declarations) |declaration| {
+                if (declaration.store_bound or std.ascii.isUpper(declaration.name[0])) continue;
+                const taken = for (found.items) |known| {
+                    if (std.mem.eql(u8, known.name, declaration.name)) break true;
+                } else false;
+                if (!taken) try found.append(arena, declaration);
+            }
+            if (!std.mem.eql(u8, import.local, helper.name)) try found.append(arena, .{
+                .name = import.local,
+                .code = try std.fmt.allocPrint(arena, "const {s} = {s};", .{ import.local, helper.name }),
+            });
+        }
+        return found.items;
     }
 
     /// The client half of every reactive module: its store registration,
@@ -5012,9 +5041,14 @@ const Generator = struct {
                 try fields.writer.print(" .{f} = rt.Json{{ .text = {s} }},", .{ std.zig.fmtId(initial.field), try zig_string(gen.arena, constant) });
                 continue;
             }
-            const lowered = gen.expression(value) catch continue;
+            // One the render cannot lower (a call of an imported helper) is the engine's,
+            // run before the state it starts exists.
+            const lowered: Lowered = gen.expression(value) catch switch (gen.server_value(value) catch continue) {
+                .lowered => |by_engine| by_engine,
+                .unservable => continue,
+            };
             switch (lowered.type) {
-                .string, .opt_string, .boolean, .opt_boolean, .number, .opt_number, .array, .strings, .opt_strings, .enumeration, .opt_enumeration, .null, .item => {},
+                .string, .opt_string, .boolean, .opt_boolean, .number, .opt_number, .array, .strings, .opt_strings, .enumeration, .opt_enumeration, .null, .item, .value => {},
                 else => continue,
             }
             try fields.writer.print(" .{f} = {s},", .{ std.zig.fmtId(initial.field), lowered.code });
