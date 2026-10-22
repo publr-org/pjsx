@@ -5045,15 +5045,12 @@ const Generator = struct {
                 try fields.writer.print(" .{f} = rt.Json{{ .text = {s} }},", .{ std.zig.fmtId(initial.field), try zig_string(gen.arena, constant) });
                 continue;
             }
-            // An initial the render cannot lower (a call of an imported helper) is the
-            // engine's, run before the state it starts exists; a seed reads the props, which
-            // that run has not.
-            const lowered: Lowered = gen.expression(value) catch if (seeded) continue else switch (gen.server_value(value) catch continue) {
-                .lowered => |by_engine| by_engine,
-                .unservable => continue,
-            };
+            const lowered = gen.expression(value) catch continue;
             switch (lowered.type) {
-                .string, .opt_string, .boolean, .opt_boolean, .number, .opt_number, .array, .strings, .opt_strings, .enumeration, .opt_enumeration, .null, .item, .value => {},
+                .string, .opt_string, .boolean, .opt_boolean, .number, .opt_number, .array, .strings, .opt_strings, .enumeration, .opt_enumeration, .null, .item => {},
+                // The engine's (a call of an imported helper), run before the state it starts
+                // exists: an initial only, since a seed reads props that run has not.
+                .value => if (seeded) continue,
                 else => continue,
             }
             try fields.writer.print(" .{f} = {s},", .{ std.zig.fmtId(initial.field), lowered.code });
