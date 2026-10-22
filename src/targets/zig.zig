@@ -921,6 +921,23 @@ fn adapt_props(
                     return err.fail("{s}.{s}: an array prop needs fields or items", .{ where, name });
                 }
             },
+            .object => {
+                const nested = spec.fields orelse return err.fail("{s}.{s}: an object prop needs fields", .{ where, name });
+                const struct_name = try free_name(arena, names, where, try capitalize(arena, name));
+                var nested_types: std.Io.Writer.Allocating = .init(arena);
+                const object_fields = try adapt_props(arena, nested, &nested_types.writer, try std.fmt.allocPrint(arena, "{s}.{s}", .{ where, name }), names);
+
+                try names.put(arena, struct_name, {});
+                try types.writeAll(nested_types.written());
+                try types.print("pub const {s} = struct {{\n", .{struct_name});
+                try write_fields(types, object_fields);
+                try types.writeAll("};\n");
+
+                prop_type = .{
+                    .item = object_fields,
+                };
+                zig_type = struct_name;
+            },
             else => return err.fail("{s}.{s}: prop type \"{s}\" is not lowered", .{ where, name, spec.type.name() }),
         }
 
@@ -1290,8 +1307,9 @@ const Generator = struct {
 
         try gen.write_state_json();
         for (gen.module.bindings) |binding| {
-            // Event callbacks execute in the client companion, not during SSR.
-            if (binding.value.* == .function) continue;
+            // Event callbacks execute in the client companion, not during SSR; so does a
+            // call of a function an object prop carries (a view's `ctx.query(...)`).
+            if (binding.value.* == .function or gen.calls_carried_function(binding.value)) continue;
             const value = try gen.expression(binding.value);
             const name = try gen.fresh("local");
             try gen.line("const {s} = {s};", .{ name, value.code });
@@ -3710,6 +3728,20 @@ const Generator = struct {
         return null;
     }
 
+    /// `prop.name(...)` where the object prop's `name` is a function: it runs only in the
+    /// browser, where the prop carries it.
+    fn calls_carried_function(gen: *Generator, value: *const compiler.ExpressionIR) bool {
+        if (value.* != .call or value.call.callee.* != .member) return false;
+        const member = value.call.callee.member;
+        if (member.object.* != .reference or member.property != .string) return false;
+        const read = member.object.reference;
+        if (read.source != .prop) return false;
+        const prop = find_field(gen.module.props, read.name) orelse return false;
+        if (prop.type != .item) return false;
+        const field = find_field(prop.type.item, member.property.string) orelse return false;
+        return field.type == .action;
+    }
+
     fn coerce_literal(gen: *Generator, text: []const u8, target: Type) Error![]const u8 {
         return switch (target) {
             .string, .opt_string, .action => try zig_string(gen.arena, text),
@@ -3747,6 +3779,22 @@ const Generator = struct {
             }
             return out.toOwnedSlice();
         }
+        // An object crosses a component boundary field by field into the callee's struct.
+        if (lowered.type == .item and target == .item) {
+            var out: std.Io.Writer.Allocating = .init(gen.arena);
+            try out.writer.writeAll(".{");
+            for (target.item) |field| {
+                const source = find_field(lowered.type.item, field.name) orelse return gen.fail("the object passed has no field {s}", .{field.name});
+                const code = try gen.coerce(.{
+                    .code = try std.fmt.allocPrint(gen.arena, "({s}).{f}", .{ lowered.code, std.zig.fmtId(field.name) }),
+                    .type = source.type,
+                }, field.type);
+                try out.writer.print(" .{f} = {s},", .{ std.zig.fmtId(field.name), code });
+            }
+            try out.writer.writeAll(" }");
+            return out.toOwnedSlice();
+        }
+
         const same = std.meta.activeTag(lowered.type) == std.meta.activeTag(target);
         const widened = !lowered.type.is_optional() and
             std.meta.activeTag(lowered.type) == std.meta.activeTag(target.unwrapped());

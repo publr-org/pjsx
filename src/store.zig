@@ -445,6 +445,11 @@ pub fn lowerParsedStoreRegistration(allocator: Allocator, parsed_ptr: *const ana
     var prop_fallbacks: StringList = .empty;
     for (parsed.component.prop_bindings.keys(), parsed.component.prop_bindings.values()) |binding, prop_name| {
         if (!util.isIdentifierName(binding) or reactive.hasAction(binding)) continue;
+        // A view's `ctx` comes with its props; in the browser it is the page's own.
+        if (eql(prop_name, "ctx")) {
+            try prop_fallbacks.append(a, try fmt(a, "const {s} = Publr.ctx;", .{binding}));
+            continue;
+        }
         const field = parsed.schema.get(prop_name);
         const fallback = schemaFallback(field, null);
         const code = if (fallback == .undefined) "undefined" else try fallback.toJson(a);

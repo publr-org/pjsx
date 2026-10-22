@@ -1936,3 +1936,91 @@ test "side-effect imports surface as explicit component behaviors" {
     // A named import is a dependency, not a behavior.
     try expectStringList(&.{}, (try createPjsxModule(arena.a(), source, "badge.pjsx", .{})).component.behaviors);
 }
+
+const view_ctx_source =
+    \\import { Publr } from "publr-jsx";
+    \\
+    \\export type CountProps = {
+    \\  total: number;
+    \\  ctx: { person: { name: string }; query: (name: string) => { value: any }; call: (name: string) => (input: unknown) => void };
+    \\};
+    \\
+    \\export function Count({ total, ctx }: CountProps) {
+    \\  const state = Publr.reactive({ total: total });
+    \\  const counted = ctx.query("notes.count");
+    \\  const note = ctx.call("notes.add");
+    \\  Publr.effect(() => {
+    \\    if (counted.value) state.total = counted.value.count;
+    \\  });
+    \\  const add = () => note({});
+    \\  return <p onClick={add}>{ctx.person.name}: {state.total}</p>;
+    \\}
+;
+
+test "an object prop lowers to a struct and crosses into another component's" {
+    var arena = Arena.init();
+    defer arena.deinit();
+    const outer_source =
+        \\import { Count } from "./Count.ptsx";
+        \\
+        \\export type PanelProps = {
+        \\  ctx: { person: { name: string }; query: (name: string) => { value: any }; call: (name: string) => (input: unknown) => void };
+        \\};
+        \\
+        \\export function Panel({ ctx }: PanelProps) {
+        \\  return <div><Count total={1} ctx={ctx} /></div>;
+        \\}
+    ;
+    const count = try zigCodeSet(arena.a(), &.{
+        .{ "Count.ptsx", view_ctx_source },
+        .{ "Panel.ptsx", outer_source },
+    }, "Count");
+
+    try expectContains(count, "pub const Ctx = struct {");
+    try expectContains(count, "ctx: Ctx,");
+    // What only the browser has is not run on the server.
+    try expectNotContains(count, "notes.count");
+
+    const panel = try zigCodeSet(arena.a(), &.{
+        .{ "Count.ptsx", view_ctx_source },
+        .{ "Panel.ptsx", outer_source },
+    }, "Panel");
+
+    try expectContains(panel, ".ctx = .{ .person = .{ .name = ((props.ctx).person).name, }, .query = (props.ctx).query, .call = (props.ctx).call, }");
+}
+
+test "a store keeps the constants its handlers and effects read, and a view's ctx is the page's" {
+    var arena = Arena.init();
+    defer arena.deinit();
+    const registration = (lowerPjsxStoreRegistration(arena.a(), view_ctx_source, "Count.ptsx") catch |e| return report(e)).?;
+
+    try expectContains(registration.code, "const ctx = Publr.ctx;");
+    try expectContains(registration.code, "const counted = ctx.query(\"notes.count\");");
+    try expectContains(registration.code, "const note = ctx.call(\"notes.add\");");
+    try expectContains(registration.code, "Publr.effect(");
+}
+
+test "a stateful module shares only the helpers that leave its state alone" {
+    var arena = Arena.init();
+    defer arena.deinit();
+    const frame_source =
+        \\import { Publr } from "publr-jsx";
+        \\
+        \\export const state = Publr.reactive({ plugin: "" });
+        \\export function reply(to: string) { return to; }
+        \\export function answer(to: string) { return reply(to); }
+        \\export function go(to: string) { return state.plugin + to; }
+        \\export function later(to: string) { return go(to); }
+        \\
+        \\export function Frame() {
+        \\  return <div>{state.plugin}</div>;
+        \\}
+    ;
+    const module = createPjsxModule(arena.a(), frame_source, "Frame.ptsx", .{}) catch |e| return report(e);
+    const shared = module.component.shared_code.?;
+
+    try expectContains(shared, "function reply(");
+    try expectContains(shared, "function answer(");
+    try expectNotContains(shared, "function go(");
+    try expectNotContains(shared, "function later(");
+}

@@ -211,6 +211,9 @@ pub const NodeIR = union(enum) {
 pub const DeclarationIR = struct {
     name: []const u8,
     code: []const u8,
+    /// It reads the module's state or refs, itself or through another helper: it runs only
+    /// inside the module's own store, so no island may import it.
+    store_bound: bool = false,
 };
 
 pub const ImportNameIR = struct {
@@ -278,8 +281,8 @@ pub const ComponentIR = struct {
     reactive: ?ReactiveIR,
     family: ?FamilyIR,
     store_registration: ?StoreRegistrationIR = null,
-    /// A plain module's helpers, for the islands that import them: its top-level functions
-    /// and constants other than components, type-stripped JS. Null for a stateful module.
+    /// The module's helpers, for the islands that import them: its top-level functions and
+    /// constants other than components and those bound to its store, type-stripped JS.
     shared_code: ?[]const u8 = null,
     /// The module's top-level helpers one by one (its state aside), so a compiled
     /// expression's block, or its server program, carries only those it reads.
@@ -930,9 +933,8 @@ pub fn createPjsxModule(allocator: Allocator, original_source: []const u8, filen
             };
         }
     }
-    const plain = parsed.component.reactive == null and parsed.family == null;
     const declarations = try moduleDeclarations(allocator, parsed, filename);
-    const shared_code: ?[]const u8 = if (plain) try sharedCode(allocator, declarations) else null;
+    const shared_code = try sharedCode(allocator, declarations);
     const module = try allocator.create(ModuleIR);
     module.* = .{
         .filename = filename,
@@ -1056,14 +1058,14 @@ fn assertedArray(allocator: Allocator, node: *Node, parsed: *const analyze.Parse
     return null;
 }
 
-/// A plain module's top-level functions and constants other than components (a component
-/// is capitalised), as type-stripped JS, so an island importing one of them can run it in
-/// the browser. Null when the module has none.
+/// A module's top-level functions and constants other than components (a component is
+/// capitalised) and those bound to its store, as type-stripped JS, so an island importing
+/// one of them can run it in the browser. Null when the module has none.
 fn sharedCode(allocator: Allocator, declarations: []const DeclarationIR) Error!?[]const u8 {
     if (declarations.len == 0) return null;
     var parts: std.ArrayList([]const u8) = .empty;
     for (declarations) |declaration| {
-        if (std.ascii.isUpper(declaration.name[0])) continue;
+        if (std.ascii.isUpper(declaration.name[0]) or declaration.store_bound) continue;
         try parts.append(allocator, declaration.code);
     }
     if (parts.items.len == 0) return null;
@@ -1075,6 +1077,7 @@ fn sharedCode(allocator: Allocator, declarations: []const DeclarationIR) Error!?
 fn moduleDeclarations(allocator: Allocator, parsed: *const analyze.ParsedModule, filename: []const u8) Error![]const DeclarationIR {
     const src = parsed.canonical;
     var found: std.ArrayList(DeclarationIR) = .empty;
+    var nodes: std.ArrayList(*Node) = .empty;
     for (parsed.program.statements) |statement| {
         const declaration = (if (statement.type == .ExportNamedDeclaration) statement.declaration else statement) orelse continue;
         const name: ?[]const u8 = switch (declaration.type) {
@@ -1094,8 +1097,41 @@ fn moduleDeclarations(allocator: Allocator, parsed: *const analyze.ParsedModule,
             .name = helper,
             .code = std.mem.trim(u8, stripped, "\n "),
         });
+        try nodes.append(allocator, declaration);
     }
+    try markStoreBound(allocator, parsed, found.items, nodes.items);
     return found.items;
+}
+
+/// Marks each helper that reads the module's state or refs, or another helper that does.
+fn markStoreBound(allocator: Allocator, parsed: *const analyze.ParsedModule, found: []DeclarationIR, nodes: []const *Node) Error!void {
+    std.debug.assert(found.len == nodes.len);
+    var bound: std.ArrayList([]const u8) = .empty;
+    if (parsed.component.reactive) |reactive| {
+        try bound.append(allocator, reactive.state_name);
+        for (reactive.refs) |ref| try bound.append(allocator, ref.name);
+    }
+    if (parsed.family) |family| {
+        try bound.append(allocator, family.state_name);
+        for (family.refs) |ref| try bound.append(allocator, ref.name);
+    }
+    if (bound.items.len == 0) return;
+    const Reads = struct {
+        fn any(names: []const []const u8, candidate: *Node) bool {
+            for (names) |name| if (candidate.isIdentifier(name)) return true;
+            return false;
+        }
+    };
+    var changed = true;
+    while (changed) {
+        changed = false;
+        for (found, nodes) |*declaration, node| {
+            if (declaration.store_bound or !ast.contains(node, @as([]const []const u8, bound.items), Reads.any)) continue;
+            declaration.store_bound = true;
+            try bound.append(allocator, declaration.name);
+            changed = true;
+        }
+    }
 }
 
 fn refNames(allocator: Allocator, refs: []const analyze.RefBinding) Allocator.Error![]const []const u8 {
