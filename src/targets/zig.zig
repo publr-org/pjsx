@@ -4154,14 +4154,12 @@ const Generator = struct {
         }
         const positioned = function.function.parameters.len == 2;
 
-        if (positioned and try gen.wire_spec(call.callee.member.object) != null) {
-            return gen.fail("a live list's `.map` takes the item alone", .{});
-        }
         if (try gen.wire_spec(call.callee.member.object)) |wired| {
             const parameter_source = function.function.parameters[0];
             const parameter = try gen.local_name(parameter_source);
-            try gen.wire_aliases.append(gen.arena, parameter);
-            defer _ = gen.wire_aliases.pop();
+            const aliases = gen.wire_aliases.items.len;
+            try gen.row_aliases(function.function);
+            defer gen.wire_aliases.shrinkRetainingCapacity(aliases);
             // Inside a server-rendered row the anchor carries only its id: the
             // runtime reads the loop spec and key from the prototype it registered
             // under that id, so the row does not repeat them.
@@ -4176,6 +4174,7 @@ const Generator = struct {
                 try gen.static(" of ");
                 try gen.static_escaped(wired.spec, true);
                 try gen.static("\"");
+                try gen.index_attribute(function.function);
                 if (body.* == .node and body.node.node.* == .element) {
                     for (body.node.node.element.attributes) |attr| {
                         if (attr == .attribute and std.mem.eql(u8, attr.attribute.name, "key")) {
@@ -4202,7 +4201,6 @@ const Generator = struct {
         }
         if (try gen.slot_call(call.callee.member.object)) |slot| {
             if (slot.live and slot.arguments.len > 0) {
-                if (positioned) return gen.fail("a live list's `.map` takes the item alone", .{});
                 return gen.slot_list_loop(e, call.callee.member.object, function.function);
             }
         }
@@ -4320,8 +4318,8 @@ const Generator = struct {
         try gen.flush();
         const positioned = function.parameters.len == 2;
         // The reactive arm only where its rows can be a prototype; a list whose rows read
-        // what a wire cannot say (their position among them too) stays rows alone.
-        const reactive = if (positioned) null else try gen.trial(gen.indent + 1, struct {
+        // what a wire cannot say stays rows alone.
+        const reactive = try gen.trial(gen.indent + 1, struct {
             fn emit(inner: *Generator, args: anytype) Error!void {
                 try inner.reactive_rows(args.e, args.function, args.capture, args.subject);
             }
@@ -4417,8 +4415,9 @@ const Generator = struct {
         const parameter_source = function.parameters[0];
         const parameter = try gen.local_name(parameter_source);
         const body = function.body;
-        try gen.wire_aliases.append(gen.arena, parameter);
-        defer _ = gen.wire_aliases.pop();
+        const aliases = gen.wire_aliases.items.len;
+        try gen.row_aliases(function);
+        defer gen.wire_aliases.shrinkRetainingCapacity(aliases);
         try gen.static("<template data-p-template=\"");
         try gen.static(try gen.template_id(e, true));
         try gen.static("\" data-p-for=\"");
@@ -4427,6 +4426,7 @@ const Generator = struct {
         try gen.flush();
         try gen.line("try rt.escape({s}, {s});", .{ gen.writer_name, capture });
         try gen.static("\"");
+        try gen.index_attribute(function);
         if (body.* == .node and body.node.node.* == .element) {
             for (body.node.node.element.attributes) |attr| {
                 if (attr == .attribute and std.mem.eql(u8, attr.attribute.name, "key")) {
@@ -4597,6 +4597,19 @@ const Generator = struct {
         try gen.line("for ({s}, 0..) |{s}, {s}| {{", .{ subject.code, parameter, index });
         gen.indent += 1;
         try gen.line("_ = &{s};", .{index});
+        const locals = gen.locals.items.len;
+        defer gen.locals.shrinkRetainingCapacity(locals);
+        if (function.parameters.len == 2) {
+            const position_source = function.parameters[1];
+            const position = try gen.local_name(position_source);
+            try gen.line("const {s}: f64 = @floatFromInt({s});", .{ position, index });
+            try gen.line("_ = &{s};", .{position});
+            try gen.locals.append(gen.arena, .{
+                .name = position,
+                .source_name = position_source,
+                .type = .number,
+            });
+        }
         try gen.locals.append(gen.arena, .{
             .name = parameter,
             .source_name = parameter_source,
@@ -4623,9 +4636,24 @@ const Generator = struct {
         gen.seeded_depth -= 1;
         try gen.flush();
         gen.writer_name = outer;
-        _ = gen.locals.pop();
         gen.indent -= 1;
         try gen.line("}}", .{});
+    }
+
+    /// A live list's row and, with `.map((item, i) => …)`, its position: both read from the
+    /// row's store in the browser.
+    fn row_aliases(gen: *Generator, function: anytype) Error!void {
+        for (function.parameters) |parameter| {
+            try gen.wire_aliases.append(gen.arena, try gen.local_name(parameter));
+        }
+    }
+
+    /// `data-p-index="i"`: the runtime keeps each row's position in its store under that name.
+    fn index_attribute(gen: *Generator, function: anytype) Error!void {
+        if (function.parameters.len < 2) return;
+        try gen.static(" data-p-index=\"");
+        try gen.static_escaped(try gen.local_name(function.parameters[1]), true);
+        try gen.static("\"");
     }
 
     /// Writes a lowered value according to its type: strings escaped, nodes raw,

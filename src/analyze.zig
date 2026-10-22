@@ -1215,8 +1215,12 @@ fn familyBinding(allocator: Allocator, program: *Node, fn_node: *Node, component
             var carries = false;
             for (declaration.declarations) |item| {
                 const id = item.id.?;
-                if (id.type != .Identifier or item.init == null) continue;
-                const init = unwrap(item.init.?);
+                if (id.type != .Identifier) continue;
+                // `let timer: number;`: set by the actions, so it lives in the store with them.
+                const init = unwrap(item.init orelse {
+                    carries = true;
+                    continue;
+                });
                 if (isPublrCall(init, "reactive")) {
                     if (!exported) return err.failMsg("pjsx: a module-level reactive family store must be exported");
                     if (!util.eql(id.name, "state")) return err.failMsg("pjsx: a module-level family store must be exported as `state`");

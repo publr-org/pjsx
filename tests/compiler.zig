@@ -2024,3 +2024,49 @@ test "a stateful module shares only the helpers that leave its state alone" {
     try expectNotContains(shared, "function go(");
     try expectNotContains(shared, "function later(");
 }
+
+test "a module-level `let` without a value stays in the store its actions run in" {
+    var arena = Arena.init();
+    defer arena.deinit();
+    const timer_source =
+        \\import { Publr } from "publr-jsx";
+        \\
+        \\export const state = Publr.reactive({ typed: 0 });
+        \\
+        \\let waiting: number;
+        \\
+        \\export const typed = () => {
+        \\  clearTimeout(waiting);
+        \\  waiting = setTimeout(() => { state.typed += 1; }, 200);
+        \\};
+        \\
+        \\export function Timer() {
+        \\  return <input onInput={typed} value={`${state.typed}`} />;
+        \\}
+    ;
+    const registration = (lowerPjsxStoreRegistration(arena.a(), timer_source, "Timer.ptsx") catch |e| return report(e)).?;
+
+    try expectContains(registration.code, "let waiting");
+}
+
+test "a live list's `.map((item, i) => …)` keeps each row's position in its store" {
+    var arena = Arena.init();
+    defer arena.deinit();
+    const list_source =
+        \\import { Publr } from "publr-jsx";
+        \\
+        \\export const state = Publr.reactive({ rows: [] as Array<{ label: string }> });
+        \\
+        \\export function Rows() {
+        \\  return <ul>{state.rows.map((row, i) => <li data-at={`${i}`}>{i}: {row.label}</li>)}</ul>;
+        \\}
+    ;
+    const code = try zigCode(arena.a(), list_source, "Rows.ptsx");
+
+    // The browser keeps the position in the row's store under the name the source gives it.
+    try expectContains(code, "data-p-for=\\\"row of $rows\\\" data-p-index=\\\"i\\\"");
+    try expectContains(code, "<span data-p-text=\\\"$i\\\">");
+    try expectContains(code, "// slot e_Rows_1: ({ i }) => `${i}`");
+    // The server's rows are numbered as the browser numbers them.
+    try expectContains(code, "const i: f64 = @floatFromInt(");
+}
