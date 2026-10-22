@@ -252,7 +252,7 @@ pub fn canonicalize(allocator: Allocator, src: []const u8) err.Error!Result {
 
     try c.out.appendSlice(allocator, src[c.last..]);
     return .{
-        .code = try c.out.toOwnedSlice(allocator),
+        .code = try @import("early_returns.zig").rewrite(allocator, try c.out.toOwnedSlice(allocator)),
         .edits = try c.edits.toOwnedSlice(allocator),
     };
 }
