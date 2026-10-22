@@ -334,7 +334,7 @@ pub const Program = struct {
     /// the compiled expressions for their first values; empty, it lowers them to Zig.
     expressions_field: []const u8 = "",
     /// The request field holding the class book a render's classes are written with: set,
-    /// every class stack is merged with it (`rt.write_merged_in`); empty, with the consumer's
+    /// every class stack is merged with it (`rt.write_merged`'s `.book`); empty, with the consumer's
     /// own.
     classes_field: []const u8 = "",
     /// The request field holding the page's set of templates written (`rt.Templates`): set,
@@ -2428,9 +2428,9 @@ const Generator = struct {
         const parts = try gen.class_parts(attrs, wires);
         try gen.static(" class=\"");
         if (try gen.class_book_code()) |book| {
-            try gen.line("try rt.write_merged_in({s}, arena, {s}, &.{{{s} }});", .{ gen.writer_name, book, parts });
+            try gen.line("try rt.write_merged({s}, arena, &.{{{s} }}, .{{ .book = {s}, }});", .{ gen.writer_name, parts, book });
         } else {
-            try gen.line("try rt.write_merged({s}, arena, &.{{{s} }});", .{ gen.writer_name, parts });
+            try gen.line("try rt.write_merged({s}, arena, &.{{{s} }}, .{{}});", .{ gen.writer_name, parts });
         }
         try gen.static("\"");
     }
@@ -2678,7 +2678,7 @@ const Generator = struct {
     /// A node written where it stands, handed the request this render holds.
     fn render_node(gen: *Generator, code: []const u8) Error!void {
         gen.props_used = true;
-        try gen.line("try {s}.render_in({s}, arena, props.publr_request, {s});", .{ code, gen.writer_name, gen.family_code });
+        try gen.line("try {s}.render({s}, arena, .{{ .request = props.publr_request, .family = {s}, }});", .{ code, gen.writer_name, gen.family_code });
     }
 
     fn url_base_for(gen: *Generator, code: []const u8) Error!void {
@@ -3038,6 +3038,13 @@ const Generator = struct {
         // holding the choice, as a child's `{state.open ? <A/> : <B/>}` is, never decided
         // here once. Such a block is always present, even when it draws nothing.
         if (e.* != .node and gen.reads_state(e)) {
+            const holder = try gen.arena.create(NodeIR);
+            holder.* = .{ .expression = .{ .value = e } };
+            return gen.markup_block(holder);
+        }
+        // `items={rows.map((row) => <Row/>)}`: the list drawn as a block, its body the same
+        // loop a child's `{rows.map(...)}` is.
+        if (is_map_call(e)) {
             const holder = try gen.arena.create(NodeIR);
             holder.* = .{ .expression = .{ .value = e } };
             return gen.markup_block(holder);
@@ -3491,9 +3498,9 @@ const Generator = struct {
             gen.arena_used = true;
             const parts = try gen.class_parts(class_attrs.items, null);
             if (try gen.class_book_code()) |book| {
-                try fields.writer.print(" .class = try rt.merge_classes_in(arena, {s}, &.{{{s} }}),", .{ book, parts });
+                try fields.writer.print(" .class = try rt.merge_classes(arena, &.{{{s} }}, .{{ .book = {s}, }}),", .{ parts, book });
             } else {
-                try fields.writer.print(" .class = try rt.merge_classes(arena, &.{{{s} }}),", .{parts});
+                try fields.writer.print(" .class = try rt.merge_classes(arena, &.{{{s} }}, .{{}}),", .{parts});
             }
         }
 
@@ -3733,7 +3740,11 @@ const Generator = struct {
                 try out.writer.print(" .@\"{s}\" => .@\"{s}\",", .{ tag, tag });
             }
             try out.writer.writeAll(" })");
-            if (lowered.type.is_optional()) try out.writer.writeAll(" else null)");
+            // Into a value that must be there, TypeScript has narrowed the optional (a
+            // `x ? <Icon name={x} /> : …`): its null is never reached.
+            if (lowered.type.is_optional()) {
+                try out.writer.writeAll(if (target.is_optional()) " else null)" else " else unreachable)");
+            }
             return out.toOwnedSlice();
         }
         const same = std.meta.activeTag(lowered.type) == std.meta.activeTag(target);
@@ -4074,7 +4085,8 @@ const Generator = struct {
         return outer;
     }
 
-    /// `xs.map((x) => <…/>)` → `for (xs) |x| { … }`.
+    /// `xs.map((x) => <…/>)` → `for (xs) |x| { … }`; `xs.map((x, i) => …)` also binds the
+    /// item's position as a number.
     fn loop(gen: *Generator, e: *const ExpressionIR) Error!void {
         const call = e.call;
 
@@ -4087,10 +4099,16 @@ const Generator = struct {
         }
 
         const function = call.arguments[0];
-        if (function.* != .function or function.function.parameters.len != 1) {
-            return gen.fail("`.map` takes a one-parameter arrow function", .{});
+        if (function.* != .function or function.function.parameters.len == 0 or
+            function.function.parameters.len > 2)
+        {
+            return gen.fail("`.map` takes an arrow function of the item, and its position", .{});
         }
+        const positioned = function.function.parameters.len == 2;
 
+        if (positioned and try gen.wire_spec(call.callee.member.object) != null) {
+            return gen.fail("a live list's `.map` takes the item alone", .{});
+        }
         if (try gen.wire_spec(call.callee.member.object)) |wired| {
             const parameter_source = function.function.parameters[0];
             const parameter = try gen.local_name(parameter_source);
@@ -4136,6 +4154,7 @@ const Generator = struct {
         }
         if (try gen.slot_call(call.callee.member.object)) |slot| {
             if (slot.live and slot.arguments.len > 0) {
+                if (positioned) return gen.fail("a live list's `.map` takes the item alone", .{});
                 return gen.slot_list_loop(e, call.callee.member.object, function.function);
             }
         }
@@ -4157,7 +4176,7 @@ const Generator = struct {
         const parameter_source = function.function.parameters[0];
         const parameter = try gen.local_name(parameter_source);
 
-        try gen.line("for ({s}) |{s}| {{", .{ subject.code, parameter });
+        try gen.loop_head(subject.code, parameter, function.function);
         gen.indent += 1;
         try gen.locals.append(gen.arena, .{
             .name = parameter,
@@ -4167,8 +4186,30 @@ const Generator = struct {
         try gen.child_expression(function.function.body);
         try gen.flush();
         _ = gen.locals.pop();
+        if (positioned) _ = gen.locals.pop();
         gen.indent -= 1;
         try gen.line("}}", .{});
+    }
+
+    /// `for (<subject>) |<item>| {`, or with the item's position, `.map((item, i) => …)`, bound
+    /// as a number local `i` (popped by the caller after the item).
+    fn loop_head(gen: *Generator, subject: []const u8, parameter: []const u8, function: anytype) Error!void {
+        if (function.parameters.len < 2) {
+            return gen.line("for ({s}) |{s}| {{", .{ subject, parameter });
+        }
+        const position = try gen.fresh("publr_position");
+        try gen.line("for ({s}, 0..) |{s}, {s}| {{", .{ subject, parameter, position });
+        const position_source = function.parameters[1];
+        const position_name = try gen.local_name(position_source);
+        gen.indent += 1;
+        try gen.line("const {s}: f64 = @floatFromInt({s});", .{ position_name, position });
+        try gen.line("_ = &{s};", .{position_name});
+        gen.indent -= 1;
+        try gen.locals.append(gen.arena, .{
+            .name = position_name,
+            .source_name = position_source,
+            .type = .number,
+        });
     }
 
     const ChosenArm = struct {
@@ -4229,9 +4270,10 @@ const Generator = struct {
         gen.props_used = true;
 
         try gen.flush();
+        const positioned = function.parameters.len == 2;
         // The reactive arm only where its rows can be a prototype; a list whose rows read
-        // what a wire cannot say stays rows alone, as before.
-        const reactive = try gen.trial(gen.indent + 1, struct {
+        // what a wire cannot say (their position among them too) stays rows alone.
+        const reactive = if (positioned) null else try gen.trial(gen.indent + 1, struct {
             fn emit(inner: *Generator, args: anytype) Error!void {
                 try inner.reactive_rows(args.e, args.function, args.capture, args.subject);
             }
@@ -4255,7 +4297,7 @@ const Generator = struct {
             },
             else => .string,
         };
-        try gen.line("for ({s}) |{s}| {{", .{ subject.code, parameter });
+        try gen.loop_head(subject.code, parameter, function);
         gen.indent += 1;
         try gen.locals.append(gen.arena, .{
             .name = parameter,
@@ -4265,6 +4307,7 @@ const Generator = struct {
         try gen.child_expression(function.body);
         try gen.flush();
         _ = gen.locals.pop();
+        if (positioned) _ = gen.locals.pop();
         gen.indent -= 1;
         try gen.line("}}", .{});
         if (reactive != null) {
@@ -4478,9 +4521,9 @@ const Generator = struct {
         gen.arena_used = true;
         try gen.static("<span class=\"");
         if (try gen.class_book_code()) |book| {
-            try gen.line("try rt.write_merged_in({s}, arena, {s}, &.{{ \"contents\", }});", .{ gen.writer_name, book });
+            try gen.line("try rt.write_merged({s}, arena, &.{{ \"contents\", }}, .{{ .book = {s}, }});", .{ gen.writer_name, book });
         } else {
-            try gen.line("try rt.write_merged({s}, arena, &.{{ \"contents\", }});", .{gen.writer_name});
+            try gen.line("try rt.write_merged({s}, arena, &.{{ \"contents\", }}, .{{}});", .{gen.writer_name});
         }
         try gen.static("\">");
     }
@@ -5597,7 +5640,7 @@ const Generator = struct {
                             return gen.fail("no field \"{s}\" on the loop item", .{property_name});
                         };
                         return .{
-                            .code = try std.fmt.allocPrint(gen.arena, "{s}.{s}", .{ object.code, property_name }),
+                            .code = try std.fmt.allocPrint(gen.arena, "{s}.{f}", .{ object.code, std.zig.fmtId(property_name) }),
                             .type = field_of_item.type,
                         };
                     },
@@ -6185,8 +6228,8 @@ const Generator = struct {
     /// The call that tests a node for emptiness: on a page writing each template once,
     /// one that leaves the templates it meets unwritten.
     fn emptiness(gen: *Generator) Error![]const u8 {
-        const templates = (try gen.templates_code()) orelse return "is_empty(arena)";
-        return try std.fmt.allocPrint(gen.arena, "is_empty_in(arena, {s})", .{templates});
+        const templates = (try gen.templates_code()) orelse return "is_empty(arena, .{})";
+        return try std.fmt.allocPrint(gen.arena, "is_empty(arena, .{{ .templates = {s}, }})", .{templates});
     }
 
     /// The JavaScript truthiness of a lowered value as a Zig `bool`.
@@ -6534,7 +6577,7 @@ fn is_null_literal(e: *const ExpressionIR) bool {
 fn test_lower(arena: std.mem.Allocator, sources: []const [2][]const u8, which: []const u8) Error![]const u8 {
     var irs: std.ArrayList(*const compiler.ModuleIR) = .empty;
     for (sources) |pair| {
-        try irs.append(arena, try compiler.createPjsxModule(arena, pair[1], pair[0]));
+        try irs.append(arena, try compiler.createPjsxModule(arena, pair[1], pair[0], .{}));
     }
     const program = try Program.init(arena, irs.items);
     return program.listing(arena, which);
@@ -6663,7 +6706,66 @@ test "a small module lowers: props struct, escaped text, loop, conditional, comp
     const layout_source = try test_lower(arena, &sources, "Layout");
     try std.testing.expect(std.mem.indexOf(u8, layout_source, "children: ?rt.Node = null,") != null);
     try std.testing.expect(std.mem.indexOf(u8, layout_source, "try rt.escape(w, props.title);") != null);
-    try std.testing.expect(std.mem.indexOf(u8, layout_source, "try value_1.render_in(w, arena, props.publr_request, props.publr_family);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, layout_source, "try value_1.render(w, arena, .{ .request = props.publr_request, .family = props.publr_family, });") != null);
+}
+
+test "a loop item's field named like a Zig keyword is read through @\"\"" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const page_source =
+        \\export type PageProps = { columns: Array<{ id: string; align: string }> };
+        \\export function Page({ columns }: PageProps) {
+        \\  return (
+        \\    <ul>
+        \\      {columns.map((column) => (
+        \\        <li data-align={column.align}>{column.id}</li>
+        \\      ))}
+        \\    </ul>
+        \\  );
+        \\}
+    ;
+    const sources = [_][2][]const u8{
+        .{ "Page.ptsx", page_source },
+    };
+    const source = try test_lower(arena, &sources, "Page");
+
+    try std.testing.expect(std.mem.indexOf(u8, source, "column.@\"align\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "= column.align") == null);
+}
+
+test "an optional enum narrowed by a ternary fills a required enum prop" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const badge_source =
+        \\export type BadgeProps = { tone: "red" | "blue" };
+        \\export function Badge({ tone }: BadgeProps) {
+        \\  return <i data-tone={tone} />;
+        \\}
+    ;
+    const page_source =
+        \\import { Badge } from "./Badge.ptsx";
+        \\export type PageProps = { items: Array<{ id: string; tone?: "red" | "blue" }> };
+        \\export function Page({ items }: PageProps) {
+        \\  return (
+        \\    <ul>
+        \\      {items.map((item) => (
+        \\        <li>{item.tone ? <Badge tone={item.tone} /> : item.id}</li>
+        \\      ))}
+        \\    </ul>
+        \\  );
+        \\}
+    ;
+    const sources = [_][2][]const u8{
+        .{ "Badge.ptsx", badge_source },
+        .{ "Page.ptsx", page_source },
+    };
+    const source = try test_lower(arena, &sources, "Page");
+
+    try std.testing.expect(std.mem.indexOf(u8, source, " else unreachable)") != null);
 }
 
 test "an unsupported construct fails with a message naming the module and construct" {
@@ -6769,7 +6871,7 @@ test "a family root carries its store; parts wire to it through imports" {
     try std.testing.expect(std.mem.indexOf(u8, part, "data-p-class=\\\"$e_Part_3\\\"") != null);
     // The static class layer stays in the stack, through the merge, after the wire group
     // moved out of it.
-    try std.testing.expect(std.mem.indexOf(u8, part, "rt.write_merged(w, arena, &.{ \"flex\", })") != null);
+    try std.testing.expect(std.mem.indexOf(u8, part, "rt.write_merged(w, arena, &.{ \"flex\", }, .{})") != null);
 }
 
 test "events, wires and the store attribute lower to data-p-*" {
@@ -6919,7 +7021,7 @@ test "action props, Dynamic, finite maps, class stacks and aria booleans lower" 
     // Class merging uses the render arena even without another allocating expression.
     try std.testing.expect(std.mem.indexOf(u8, source, "_ = arena;") == null);
     // The class stack merges through the runtime; the finite map is a switch.
-    try std.testing.expect(std.mem.indexOf(u8, source, "try rt.write_merged(w, arena, &.{ \"inline-flex border\", (if (props.publr_prototype and ((if (props.publr_bind_size != null) @as(?[]const u8, rt.concat(arena, &.{ \"$e_Button_2(\", \"size: \", rt.slot_argument(arena, props.publr_bind_size, props.size), \")\" })) else @as(?[]const u8, null))) != null) @as([]const u8, \"\") else (switch (props.size) { .@\"sm\" => \"h-8 px-2\", .@\"md\" => \"h-9 px-3\", })), props.classes, });") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "try rt.write_merged(w, arena, &.{ \"inline-flex border\", (if (props.publr_prototype and ((if (props.publr_bind_size != null) @as(?[]const u8, rt.concat(arena, &.{ \"$e_Button_2(\", \"size: \", rt.slot_argument(arena, props.publr_bind_size, props.size), \")\" })) else @as(?[]const u8, null))) != null) @as([]const u8, \"\") else (switch (props.size) { .@\"sm\" => \"h-8 px-2\", .@\"md\" => \"h-9 px-3\", })), props.classes, }, .{});") != null);
     // The action prop becomes a runtime wire; aria booleans serialize as text.
     try std.testing.expect(std.mem.indexOf(u8, source, "try rt.write_wire_attr(w, \"data-p-on\", &.{ .{ .prefix = \"click:\", .value = props.onClick }, });") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, "if (props.pressed) |value_") != null);
@@ -6973,13 +7075,13 @@ test "a template drawing a prop through a child's children is written for each c
     const arena = arena_state.allocator();
     const label = try compiler.createPjsxModule(arena,
         \\export function Label({ children }: { children?: JSX.Element }) { return <span>{children}</span>; }
-    , "Label.ptsx");
+    , "Label.ptsx", .{});
     const pill = try compiler.createPjsxModule(arena,
         \\import { Label } from "./Label.ptsx";
         \\export function Pill({ detail = "" }: { detail?: string }) {
         \\  return <div>{detail !== "" && <Label>{detail}</Label>}</div>;
         \\}
-    , "Pill.ptsx");
+    , "Pill.ptsx", .{});
     var program = try Program.init(arena, &.{ label, pill });
     program.request = &.{.{
         .name = "templates",
@@ -7092,7 +7194,7 @@ test "with an engine, a live expression's first value is run on the server" {
         \\    {state.items.map((item) => <li class={TONES[item.tone] ?? "text-b"}>{item.tone}</li>)}
         \\  </ul>;
         \\}
-    , "Panel.ptsx");
+    , "Panel.ptsx", .{});
     var program = try Program.init(arena, &.{module});
     program.request = &.{.{
         .name = "path",
@@ -7126,7 +7228,7 @@ test "with an engine, a part in another file draws its family root's state on th
         \\  state.items = items;
         \\  return <div>{children}</div>;
         \\}
-    , "Library.ptsx");
+    , "Library.ptsx", .{});
     const part = try compiler.createPjsxModule(arena,
         \\import { state } from "./Library.ptsx";
         \\export function LibraryGrid() {
@@ -7134,7 +7236,7 @@ test "with an engine, a part in another file draws its family root's state on th
         \\    {state.items.map((item) => <li>{item.title}</li>)}
         \\  </ul>;
         \\}
-    , "LibraryGrid.ptsx");
+    , "LibraryGrid.ptsx", .{});
     var program = try Program.init(arena, &.{ root, part });
     program.request = &.{.{
         .name = "path",
@@ -7149,7 +7251,7 @@ test "with an engine, a part in another file draws its family root's state on th
     };
     // The root hands its state down: to its children as they render, and to every call.
     try std.testing.expect(std.mem.indexOf(u8, root_code, "var publr_family_held = rt.family_of(\"library\", publr_state, props.publr_family);") != null);
-    try std.testing.expect(std.mem.indexOf(u8, root_code, "render_in(w, arena, props.publr_request, publr_family);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, root_code, "render(w, arena, .{ .request = props.publr_request, .family = publr_family, });") != null);
     const part_code = program.lower(arena, "LibraryGrid") catch |e| {
         std.debug.print("\n{s}\n", .{err.message()});
         return e;
@@ -7170,7 +7272,7 @@ test "with an engine, a static expression the render cannot lower is the engine'
         \\export function Label({ text, small }: { text: string; small: boolean }) {
         \\  return <span class={small ? "text-xs" : "text-sm"} title={shout(text)}>{text}</span>;
         \\}
-    , "Label.ptsx");
+    , "Label.ptsx", .{});
     var program = try Program.init(arena, &.{module});
     program.request = &.{.{
         .name = "path",
@@ -7197,7 +7299,7 @@ test "a slot that calls an intrinsic takes its JavaScript into the browser's sto
         \\import { Publr, initials } from "publr-jsx";
         \\export const state = Publr.reactive({ name: "" });
         \\export function Badge() { return <span>{initials(state.name)}</span>; }
-    , "Badge.ptsx");
+    , "Badge.ptsx", .{});
     const program = try Program.init(arena, &.{module});
     _ = try program.lower(arena, "Badge");
     const stores = try program.storesFile(arena);
@@ -7220,7 +7322,7 @@ test "with an engine, a list a computation makes draws its rows from the engine'
         \\    <ol>{rows.filter((row) => !row.on).map((row) => <li>{row.label}</li>)}</ol>
         \\  </div>;
         \\}
-    , "Picks.ptsx");
+    , "Picks.ptsx", .{});
     var program = try Program.init(arena, &.{module});
     program.request = &.{.{
         .name = "path",
@@ -7248,7 +7350,7 @@ test "an unseeded state field cast to a string union fills an enum prop with its
         \\export function Grid({ size = "md" }: { size?: "sm" | "md" | "lg" }) {
         \\  return <div data-size={size} />;
         \\}
-    , "Grid.ptsx");
+    , "Grid.ptsx", .{});
     const picker = try compiler.createPjsxModule(arena,
         \\import { Publr } from "publr-jsx";
         \\import { Grid } from "./Grid.ptsx";
@@ -7256,7 +7358,7 @@ test "an unseeded state field cast to a string union fills an enum prop with its
         \\export function Picker() {
         \\  return <div><Grid size={state.tile_size} /></div>;
         \\}
-    , "Picker.ptsx");
+    , "Picker.ptsx", .{});
     var program = try Program.init(arena, &.{ grid, picker });
     const code = program.lower(arena, "Picker") catch |e| {
         std.debug.print("\n{s}\n", .{err.message()});
@@ -7273,7 +7375,7 @@ test "a style object is written inside the element's tag, not before it" {
         \\export function Dot({ tone = "red" }: { tone?: string }) {
         \\  return <p><span class="dot" style={{ left: "calc(1px + 2px)" }} title={tone}></span><i style={{ color: tone }}></i></p>;
         \\}
-    , "Dot.ptsx");
+    , "Dot.ptsx", .{});
     var program = try Program.init(arena, &.{module});
     const code = program.lower(arena, "Dot") catch |e| {
         std.debug.print("\n{s}\n", .{err.message()});
@@ -7301,7 +7403,7 @@ test "the same enum shape at two depths gets two type names" {
         \\export function Shelf({ files, parts, cells }: ShelfProps) {
         \\  return <p data-count={`${files.length}${parts.length}${cells.length}`}></p>;
         \\}
-    , "Shelf.ptsx");
+    , "Shelf.ptsx", .{});
     var program = try Program.init(arena, &.{module});
     _ = program.lower(arena, "Shelf") catch |e| {
         std.debug.print("\n{s}\n", .{err.message()});

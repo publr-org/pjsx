@@ -440,7 +440,7 @@ test "a plain module's helpers reach its block" {
         \\export function Card({ look = "card" }: { look?: Look }) {
         \\  return <article class={["relative", LOOK[look]]} />;
         \\}
-    , "Card.ptsx");
+    , "Card.ptsx", .{});
     try std.testing.expectEqual(@as(usize, 2), module.component.declarations.len);
     try std.testing.expectEqualStrings("LOOK", module.component.declarations[1].name);
 }

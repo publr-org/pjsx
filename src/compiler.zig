@@ -878,13 +878,12 @@ fn capabilitiesOf(allocator: Allocator, root: *const NodeIR, parsed: *const anal
     return slice;
 }
 
-pub fn createPjsxModule(allocator: Allocator, source: []const u8, filename: []const u8) Error!*ModuleIR {
-    return createPjsxModuleWithResolver(allocator, source, filename, null);
-}
+pub const ModuleOptions = analyze.Options;
 
-pub fn createPjsxModuleWithResolver(allocator: Allocator, original_source: []const u8, filename: []const u8, resolver: ?@import("types.zig").Resolver) Error!*ModuleIR {
+pub fn createPjsxModule(allocator: Allocator, original_source: []const u8, filename: []const u8, options: ModuleOptions) Error!*ModuleIR {
+    const resolver = options.resolver;
     const source = if (resolver) |r| try @import("inline_html.zig").expand(allocator, original_source, filename, r) else original_source;
-    const parsed_value = try analyze.parsePjsxWithResolver(allocator, source, filename, resolver);
+    const parsed_value = try analyze.parsePjsx(allocator, source, filename, options);
     const parsed = try allocator.create(analyze.ParsedModule);
     parsed.* = parsed_value;
     const root = try nodeIR(allocator, parsed.component.root, parsed);
@@ -1106,7 +1105,7 @@ fn refNames(allocator: Allocator, refs: []const analyze.RefBinding) Allocator.Er
 }
 
 pub fn collectPjsxClasses(allocator: Allocator, source: []const u8, filename: []const u8) Error![]const []const u8 {
-    const module = try createPjsxModule(allocator, source, filename);
+    const module = try createPjsxModule(allocator, source, filename, .{});
     return allocator.dupe([]const u8, module.classes);
 }
 
@@ -1150,7 +1149,7 @@ pub fn compilePjsx(comptime Options: type, comptime Output: type, allocator: All
         return err.fail("pjsx: target {s} uses compiler API {d}; expected {d}", .{ try util.jsonString(allocator, target.name), target.api_version, PJSX_COMPILER_API_VERSION });
     }
     const module: *const ModuleIR = switch (input) {
-        .source => |source| try createPjsxModule(allocator, source, options.filename),
+        .source => |source| try createPjsxModule(allocator, source, options.filename, .{}),
         .module => |module| module,
     };
     if (target.capabilities) |supported| {
@@ -1839,7 +1838,7 @@ test "a third-party target compiles the public semantic IR without changing PJSX
     defer arena.deinit();
     const a = arena.allocator();
     const Options = struct {
-        prefix: []const u8,
+        prefix: []const u8 = "",
     };
     const Manifest = struct {
         fn compile(allocator: Allocator, module: *const ModuleIR, context: CompileContext, options: Options) Error![]const u8 {
@@ -1863,7 +1862,7 @@ test "a third-party target compiles the public semantic IR without changing PJSX
         },
     });
     try std.testing.expectEqualStrings("custom:Badge:label", output);
-    const module = try createPjsxModule(a, badge_source, "badge.pjsx");
+    const module = try createPjsxModule(a, badge_source, "badge.pjsx", .{});
     try std.testing.expect(module.component.root.* == .element);
 }
 
@@ -1933,7 +1932,7 @@ test "the IR carries module-level finite string maps so targets need no AST" {
         \\export function Dot({ tone }) {
         \\  return <span data-part="dot" class={toneClass[tone]} />;
         \\}
-    , "dot.ptsx");
+    , "dot.ptsx", .{});
     try std.testing.expectEqual(@as(usize, 1), module.finite_maps.count());
     const tone = module.finite_maps.get("toneClass").?;
     try std.testing.expectEqualStrings("text-muted-foreground", tone.get("draft").?);
@@ -1946,7 +1945,7 @@ test "the whole IR survives a JSON round-trip for out-of-process targets" {
     var arena = testArena();
     defer arena.deinit();
     const a = arena.allocator();
-    const module = try createPjsxModule(a, badge_source, "badge.pjsx");
+    const module = try createPjsxModule(a, badge_source, "badge.pjsx", .{});
     const json = try toJson(a, module);
     try std.testing.expect(try jsonRoundTripEquals(a, json));
     try std.testing.expect(util.indexOf(json, "\"apiVersion\":1") != null);
@@ -1965,7 +1964,7 @@ test "IR capabilities are sorted so serialized modules are byte-stable" {
         \\  return <><Slot style={{}} @portal>{items.map((i) => <b>{i}</b>)}</Slot>{on ? <i /> : null}</>;
         \\}
     ;
-    const module = try createPjsxModule(a, source, "demo.ptsx");
+    const module = try createPjsxModule(a, source, "demo.ptsx", .{});
     try std.testing.expect(module.capabilities.len >= 5);
     var i: usize = 1;
     while (i < module.capabilities.len) : (i += 1) {
@@ -1994,10 +1993,10 @@ test "side-effect imports surface as explicit component behaviors" {
         \\    </div>
         \\  );
         \\}
-    , "menu.ptsx");
+    , "menu.ptsx", .{});
     try std.testing.expectEqual(@as(usize, 1), module.component.behaviors.len);
     try std.testing.expectEqualStrings("../../behaviors/dropdown", module.component.behaviors[0]);
-    const badge = try createPjsxModule(a, badge_source, "badge.pjsx");
+    const badge = try createPjsxModule(a, badge_source, "badge.pjsx", .{});
     try std.testing.expectEqual(@as(usize, 0), badge.component.behaviors.len);
 }
 

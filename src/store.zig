@@ -425,7 +425,7 @@ fn seedStartDescending(_: void, left: ReactivePropSeed, right: ReactivePropSeed)
 /// (module-level and component-body declarations) are byte-identical to the
 /// authored source.
 pub fn lowerPjsxStoreRegistration(allocator: Allocator, source: []const u8, filename: []const u8) Error!?StoreRegistrationOutput {
-    const parsed = try analyze.parsePjsx(allocator, source, filename);
+    const parsed = try analyze.parsePjsx(allocator, source, filename, .{});
     return lowerParsedStoreRegistration(allocator, &parsed);
 }
 

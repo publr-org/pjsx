@@ -71,12 +71,12 @@ fn report(e: anyerror) anyerror {
 }
 
 fn domCode(a: std.mem.Allocator, src: []const u8, filename: []const u8) ![]const u8 {
-    return (lowerPjsxToDom(a, src, filename, null) catch |e| return report(e)).code;
+    return (lowerPjsxToDom(a, src, filename, .{}) catch |e| return report(e)).code;
 }
 
 /// One module through the `zig` SSR target, the compile set being just itself.
 fn zigCode(a: std.mem.Allocator, src: []const u8, filename: []const u8) ![]const u8 {
-    const module = createPjsxModule(a, src, filename) catch |e| return report(e);
+    const module = createPjsxModule(a, src, filename, .{}) catch |e| return report(e);
     const program = pjsx.targets.zig.Program.init(a, &.{module}) catch |e| return report(e);
     return program.listing(a, module.component.name) catch |e| return report(e);
 }
@@ -86,7 +86,7 @@ fn zigCode(a: std.mem.Allocator, src: []const u8, filename: []const u8) ![]const
 fn zigCodeSet(a: std.mem.Allocator, sources: []const [2][]const u8, which: []const u8) ![]const u8 {
     var irs: std.ArrayList(*const compiler.ModuleIR) = .empty;
     for (sources) |pair| {
-        try irs.append(a, createPjsxModule(a, pair[1], pair[0]) catch |e| return report(e));
+        try irs.append(a, createPjsxModule(a, pair[1], pair[0], .{}) catch |e| return report(e));
     }
     const program = pjsx.targets.zig.Program.init(a, irs.items) catch |e| return report(e);
     return program.listing(a, which) catch |e| return report(e);
@@ -94,12 +94,12 @@ fn zigCodeSet(a: std.mem.Allocator, sources: []const [2][]const u8, which: []con
 
 /// Like `zigCode`, but without the diagnostic dump — for expected failures.
 fn zigError(a: std.mem.Allocator, src: []const u8, filename: []const u8) !void {
-    _ = try lowerPjsxToZig(a, try createPjsxModule(a, src, filename), &.{});
+    _ = try lowerPjsxToZig(a, try createPjsxModule(a, src, filename, .{}), &.{});
 }
 
 fn zigErrorSet(a: std.mem.Allocator, sources: []const [2][]const u8, which: []const u8) !void {
     var irs: std.ArrayList(*const compiler.ModuleIR) = .empty;
-    for (sources) |pair| try irs.append(a, try createPjsxModule(a, pair[1], pair[0]));
+    for (sources) |pair| try irs.append(a, try createPjsxModule(a, pair[1], pair[0], .{}));
     const program = try pjsx.targets.zig.Program.init(a, irs.items);
     _ = try program.lower(a, which);
 }
@@ -126,8 +126,8 @@ const source =
 test "the language accepts both .pjsx and .ptsx module names" {
     var arena = Arena.init();
     defer arena.deinit();
-    try expectEqualStrings("Badge", (try parsePjsx(arena.a(), source, "badge.pjsx")).component.name);
-    try expectEqualStrings("Badge", (try parsePjsx(arena.a(), source, "badge.ptsx")).component.name);
+    try expectEqualStrings("Badge", (try parsePjsx(arena.a(), source, "badge.pjsx", .{})).component.name);
+    try expectEqualStrings("Badge", (try parsePjsx(arena.a(), source, "badge.ptsx", .{})).component.name);
 }
 
 test "a component with an empty schema may omit the props parameter" {
@@ -196,7 +196,7 @@ test "repeated class attributes merge in source order across DOM and Zig targets
         \\}
         \\
     ;
-    const dom_out = lowerPjsxToDom(arena.a(), classes_source, "panel.ptsx", null) catch |e| return report(e);
+    const dom_out = lowerPjsxToDom(arena.a(), classes_source, "panel.ptsx", .{}) catch |e| return report(e);
 
     try expectMatch(dom_out.code, "classes\\(\\$\\$domElement, \\(\\) => \\[\"w-full rounded-md\", classes\\]", "");
     try expectMatch(dom_out.code, "\"data-state\", \\(\\) =>", "");
@@ -216,7 +216,7 @@ test "repeated class attributes merge in source order across DOM and Zig targets
     ;
     const zig_out = try zigCode(arena.a(), merged_source, "panel.ptsx");
     try expectNotContains(zig_out, "_ = arena;");
-    try expectContains(zig_out, "try rt.write_merged(w, arena, &.{ \"w-full rounded-md\", props.classes, });");
+    try expectContains(zig_out, "try rt.write_merged(w, arena, &.{ \"w-full rounded-md\", props.classes, }, .{});");
 
     // … but repeating any other attribute is only meaningful as an SSR + wire
     // pair, and fails loudly otherwise.
@@ -435,9 +435,7 @@ test "hidden on component calls rides the show transport with inverted polarity"
 test "conditional mounting is not exposed as a Publr directive" {
     var arena = Arena.init();
     defer arena.deinit();
-    try std.testing.expectError(error.Pjsx, transformPjsxToDom(arena.a(), "export const item = <div :if={visible}>Item</div>;", .{
-        .filename = "conditional-mount.ptsx",
-    }));
+    try std.testing.expectError(error.Pjsx, transformPjsxToDom(arena.a(), "export const item = <div :if={visible}>Item</div>;", "conditional-mount.ptsx", .{}));
     try expectMatch(pjsx.lastError(), "conditional mounting is not a Publr directive; use :show", "");
 }
 
@@ -583,7 +581,7 @@ test "Slot lowers to a structural child-root merge in the zig target" {
     ;
     const zig_out = try zigCode(arena.a(), slot_source, "Trigger.ptsx");
 
-    try expectContains(zig_out, "rt.slot_props(arena, (if (props.children) |publr_node| try rt.render_to_string(arena, publr_node) else \"\"), .{ .@\"id\" = props.id, .@\"data-part\" = \"trigger\", .@\"aria-haspopup\" = \"menu\", .@\"data-p-anchor\" = true, .class = try rt.merge_classes(arena, &.{ props.classes, })");
+    try expectContains(zig_out, "rt.slot_props(arena, (if (props.children) |publr_node| try rt.render_to_string(arena, publr_node) else \"\"), .{ .@\"id\" = props.id, .@\"data-part\" = \"trigger\", .@\"aria-haspopup\" = \"menu\", .@\"data-p-anchor\" = true, .class = try rt.merge_classes(arena, &.{ props.classes, }, .{})");
     try expectNotContains(zig_out, "<Slot");
 }
 
@@ -778,7 +776,7 @@ test "compilePjsx exposes the same target-neutral API" {
 }
 
 const ManifestOptions = struct {
-    prefix: []const u8,
+    prefix: []const u8 = "",
 };
 
 fn manifestCompile(a: std.mem.Allocator, module: *const compiler.ModuleIR, context: compiler.CompileContext, options: ManifestOptions) pjsx.Error![]const u8 {
@@ -807,7 +805,7 @@ test "a third-party target compiles the public semantic IR without changing PJSX
     }) catch |e| return report(e);
 
     try expectEqualStrings("custom:Badge:label", output);
-    try std.testing.expect((try createPjsxModule(arena.a(), source, "badge.pjsx")).component.root.* == .element);
+    try std.testing.expect((try createPjsxModule(arena.a(), source, "badge.pjsx", .{})).component.root.* == .element);
     try std.testing.expect(@TypeOf(plugins.domTarget().compile) == *const fn (std.mem.Allocator, *const compiler.ModuleIR, compiler.CompileContext, dom_target.DomTargetOptions) pjsx.Error!dom_target.DomOutput);
 }
 
@@ -851,9 +849,7 @@ test "DOM components render through the runtime root-attribute forwarding bounda
         \\  return <Dynamic as="button" aria-label={label}>{label}</Dynamic>;
         \\}
         \\export const trigger = <Trigger label="Open" data-part="trigger" aria-describedby="hint" />;
-    , .{
-        .filename = "trigger.ptsx",
-    }) catch |e| return report(e);
+    , "trigger.ptsx", .{}) catch |e| return report(e);
 
     try expectMatch(output.code, "import \\* as \\$\\$dom from \"publr/dom\"", "");
     try expectMatch(output.code, "component\\(Trigger,", "");
@@ -872,9 +868,7 @@ test "a reactive component child stays a live value instead of a nested thunk" {
         \\function Editor({ state }) {
         \\  return <Readout>{state.label}</Readout>;
         \\}
-    , .{
-        .filename = "editor.ptsx",
-    }) catch |e| return report(e);
+    , "editor.ptsx", .{}) catch |e| return report(e);
 
     try expectMatch(output.code, "get children\\(\\) \\{\\s*return state\\.label;\\s*\\}", "");
     try expectNoMatch(output.code, "get children\\(\\) \\{\\s*return \\(\\) => state\\.label", "");
@@ -889,9 +883,7 @@ test "nested JSX-bearing callbacks keep distinct rewritten parameter scopes" {
         \\    Demo: () => <Button hierarchy={hierarchy} intent={intent} />,
         \\  })),
         \\);
-    , .{
-        .filename = "nested-gallery-callbacks.ptsx",
-    }) catch |e| return report(e);
+    , "nested-gallery-callbacks.ptsx", .{}) catch |e| return report(e);
 
     try expectMatch(output.code, "flatMap\\(\\(\\$\\$p\\) =>", "");
     try expectMatch(output.code, "INTENTS\\.map\\(\\(\\$\\$p1\\) =>", "");
@@ -914,9 +906,7 @@ test "typed option children lower to descriptor data in the DOM target" {
         \\    </RangeScalePicker>
         \\  );
         \\}
-    , .{
-        .filename = "range-scale-demo.ptsx",
-    }) catch |e| return report(e);
+    , "range-scale-demo.ptsx", .{}) catch |e| return report(e);
 
     try expectMatch(output.code, "get children\\(\\) \\{\\s*return options\\.map", "");
     try expectMatch(output.code, "label: \\$\\$p\\.label", "");
@@ -933,9 +923,7 @@ test "typed option children lower to descriptor data in the DOM target" {
         \\    </RangeScalePickerOptions>
         \\  </RangeScalePicker>
         \\);
-    , .{
-        .filename = "static-range-scale.ptsx",
-    }) catch |e| return report(e);
+    , "static-range-scale.ptsx", .{}) catch |e| return report(e);
 
     try expectMatch(static_output.code, "get children\\(\\)", "");
     try expectMatch(static_output.code, "label: \"XS\"", "");
@@ -966,9 +954,7 @@ test "compound configuration-shaped children remain real component anatomy" {
         \\}
         \\
     ;
-    const dom_out = transformPjsxToDom(arena.a(), fixture_source, .{
-        .filename = "box-value-fixture.ptsx",
-    }) catch |e| return report(e);
+    const dom_out = transformPjsxToDom(arena.a(), fixture_source, "box-value-fixture.ptsx", .{}) catch |e| return report(e);
 
     try expectMatch(dom_out.code, "component\\(BoxValueControlIcon", "");
     try expectMatch(dom_out.code, "component\\(SelectedSidesIcon", "");
@@ -1061,7 +1047,7 @@ test "nullish coalescing preserves JavaScript semantics and lowers to Zig option
     try expectContains(zig_out, "children: ?rt.Node = null,");
     try expectContains(zig_out, "try rt.escape(w, (props.title orelse \"Untitled\"));");
     try expectContains(zig_out, "if ((props.hidden orelse false)) try w.writeAll(\" hidden\");");
-    try expectContains(zig_out, "try (props.children orelse props.fallback).render_in(w, arena, props.publr_request, props.publr_family);");
+    try expectContains(zig_out, "try (props.children orelse props.fallback).render(w, arena, .{ .request = props.publr_request, .family = props.publr_family, });");
 }
 
 test "optional node children can fall back to declarative JSX" {
@@ -1562,7 +1548,7 @@ test "Publr.reactive declares portable component-local state" {
     const store = lowerPjsxStoreRegistration(arena.a(), stateful_source, "disclosure.ptsx") catch |e| return report(e);
     const store_code = if (store) |s| s.code else "";
 
-    try expectEqualStrings("state", (try parsePjsx(arena.a(), stateful_source, "disclosure.ptsx")).component.reactive.?.state_name);
+    try expectEqualStrings("state", (try parsePjsx(arena.a(), stateful_source, "disclosure.ptsx", .{})).component.reactive.?.state_name);
     try expectContains(zig_out, "data-p-store=\\\"disclosure\\\"");
     try expectContains(zig_out, "data-p-on=\\\"click:open\\\"");
     try expectContains(zig_out, "data-p-show=\\\"$open\\\"");
@@ -1859,9 +1845,7 @@ test "the Vite adapter transforms both PJSX extensions" {
     inline for (.{ "pjsx", "ptsx" }) |extension| {
         const id = "/project/badge." ++ extension;
         try std.testing.expect(pjsx.isPjsxModule(id));
-        const result = transformPjsxToDom(arena.a(), source, .{
-            .filename = id,
-        }) catch |e| return report(e);
+        const result = transformPjsxToDom(arena.a(), source, id, .{}) catch |e| return report(e);
         try expectMatch(result.code, "element\\(\\s*\"span\"", "");
     }
 }
@@ -1885,7 +1869,7 @@ test "the IR carries module-level finite string maps so targets need no AST" {
         \\}
         \\
     ;
-    const module = createPjsxModule(arena.a(), map_source, "dot.ptsx") catch |e| return report(e);
+    const module = createPjsxModule(arena.a(), map_source, "dot.ptsx", .{}) catch |e| return report(e);
 
     try std.testing.expectEqual(@as(usize, 1), module.finite_maps.count());
     const tone_class = module.finite_maps.get("toneClass").?;
@@ -1907,7 +1891,7 @@ fn jsonRoundTripEquals(a: std.mem.Allocator, json: []const u8) !bool {
 test "the whole IR survives a JSON round-trip for out-of-process targets" {
     var arena = Arena.init();
     defer arena.deinit();
-    const module = createPjsxModule(arena.a(), source, "badge.pjsx") catch |e| return report(e);
+    const module = createPjsxModule(arena.a(), source, "badge.pjsx", .{}) catch |e| return report(e);
     const json = try compiler.toJson(arena.a(), module);
 
     // No field may vanish or degrade through serialization — the Zig target
@@ -1920,7 +1904,7 @@ test "the whole IR survives a JSON round-trip for out-of-process targets" {
 test "IR capabilities are sorted so serialized modules are byte-stable" {
     var arena = Arena.init();
     defer arena.deinit();
-    const first = (createPjsxModule(arena.a(), source, "badge.pjsx") catch |e| return report(e)).capabilities;
+    const first = (createPjsxModule(arena.a(), source, "badge.pjsx", .{}) catch |e| return report(e)).capabilities;
     var index: usize = 1;
     while (index < first.len) : (index += 1) {
         try std.testing.expect(std.mem.order(u8, first[index - 1].name(), first[index].name()) != .gt);
@@ -1947,8 +1931,8 @@ test "side-effect imports surface as explicit component behaviors" {
         \\}
         \\
     ;
-    const module = createPjsxModule(arena.a(), behavior_source, "menu.ptsx") catch |e| return report(e);
+    const module = createPjsxModule(arena.a(), behavior_source, "menu.ptsx", .{}) catch |e| return report(e);
     try expectStringList(&.{"../../behaviors/dropdown"}, module.component.behaviors);
     // A named import is a dependency, not a behavior.
-    try expectStringList(&.{}, (try createPjsxModule(arena.a(), source, "badge.pjsx")).component.behaviors);
+    try expectStringList(&.{}, (try createPjsxModule(arena.a(), source, "badge.pjsx", .{})).component.behaviors);
 }

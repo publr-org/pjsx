@@ -8,7 +8,8 @@
 //!
 //! This file is not part of the library module: consumers wire it as their
 //! generated code's `runtime` module, providing a `class_merge` import — a
-//! module exposing `merge_classes(arena: std.mem.Allocator, parts: []const []const u8) ![]const u8`,
+//! module exposing `merge_classes(arena: std.mem.Allocator, parts: []const []const u8, options) ![]const u8`
+//! (`options` takes `.book`, the class book the request carries, null for the consumer's own),
 //! typically a Tailwind-aware resolver so a later conflicting utility wins
 //! (`max-w-xl` after `max-w-md` removes the earlier one). A plain
 //! space-join is a valid minimal implementation. Results must remain valid for
@@ -73,41 +74,38 @@ pub const Node = struct {
     ctx: *const anyopaque = undefined,
     render_fn: ?*const fn (*const anyopaque, *std.Io.Writer, std.mem.Allocator, ?*const anyopaque, ?*const Family) anyerror!void = null,
 
-    pub fn render(node: Node, w: *std.Io.Writer, arena: std.mem.Allocator) anyerror!void {
-        return node.render_in(w, arena, null, null);
-    }
+    pub const RenderOptions = struct {
+        /// The request of the component rendering the node (`Publr.request`): a node made
+        /// ahead of time for the page (`viewed`) reads it as its own; children read their
+        /// caller's.
+        request: ?*const anyopaque = null,
+        /// The family roots of whoever renders it: a caller's children that are a
+        /// family's parts read the root's state from them.
+        family: ?*const Family = null,
+    };
 
-    /// Rendered by a component holding the request (`Publr.request`): a node made ahead of
-    /// time for the page (`viewed`) reads it as its own; children read their caller's.
-    pub fn render_with(node: Node, w: *std.Io.Writer, arena: std.mem.Allocator, request: ?*const anyopaque) anyerror!void {
-        return node.render_in(w, arena, request, null);
-    }
-
-    /// `render_with`, inside the family roots of whoever renders it: a caller's children
-    /// that are a family's parts read the root's state from them.
-    pub fn render_in(node: Node, w: *std.Io.Writer, arena: std.mem.Allocator, request: ?*const anyopaque, family: ?*const Family) anyerror!void {
+    pub fn render(node: Node, w: *std.Io.Writer, arena: std.mem.Allocator, options: RenderOptions) anyerror!void {
         if (node.raw) |html| return w.writeAll(html);
-        return node.render_fn.?(node.ctx, w, arena, request, family);
+        return node.render_fn.?(node.ctx, w, arena, options.request, options.family);
     }
+
+    pub const EmptyOptions = struct {
+        /// On a page writing each template once: the probe writes every prototype it
+        /// meets without counting it as written, so the real render still writes it.
+        templates: ?*anyopaque = null,
+    };
 
     /// The JavaScript truthiness of a node: whether it renders anything. A raw
     /// string knows; a block renders once into a counting sink to find out.
-    pub fn is_empty(node: Node, arena: std.mem.Allocator) bool {
-        return node.is_empty_in(arena, null);
-    }
-
-    /// `is_empty` on a page writing each template once (`templates`): the probe writes
-    /// every prototype it meets without counting it as written, so the real render
-    /// still writes it.
-    pub fn is_empty_in(node: Node, arena: std.mem.Allocator, templates: ?*anyopaque) bool {
+    pub fn is_empty(node: Node, arena: std.mem.Allocator, options: EmptyOptions) bool {
         if (node.raw) |html| return html.len == 0;
-        const set: ?*Templates = @ptrCast(@alignCast(templates));
+        const set: ?*Templates = @ptrCast(@alignCast(options.templates));
         if (set) |probing| probing.probing += 1;
         defer if (set) |probing| {
             probing.probing -= 1;
         };
         var probe: std.Io.Writer.Discarding = .init(&.{});
-        node.render(&probe.writer, arena) catch return false;
+        node.render(&probe.writer, arena, .{}) catch return false;
         return probe.count + probe.writer.end == 0;
     }
 };
@@ -164,7 +162,7 @@ pub fn viewed(capture: anytype, comptime Body: type) Node {
 pub fn render_to_string(arena: std.mem.Allocator, node: Node) ![]const u8 {
     if (node.raw) |html| return html;
     var out: std.Io.Writer.Allocating = .init(arena);
-    try node.render(&out.writer, arena);
+    try node.render(&out.writer, arena, .{});
     return out.written();
 }
 
@@ -186,11 +184,11 @@ test "a block node streams into the writer it is given and knows when it is empt
     const node = block(&capture, Body);
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
-    try node.render(&out.writer, std.testing.allocator);
+    try node.render(&out.writer, std.testing.allocator, .{});
     try std.testing.expectEqualStrings("<b>a &amp; b</b>", out.written());
-    try std.testing.expect(!node.is_empty(std.testing.allocator));
-    try std.testing.expect(raw("").is_empty(std.testing.allocator));
-    try std.testing.expect(!raw("x").is_empty(std.testing.allocator));
+    try std.testing.expect(!node.is_empty(std.testing.allocator, .{}));
+    try std.testing.expect(raw("").is_empty(std.testing.allocator, .{}));
+    try std.testing.expect(!raw("x").is_empty(std.testing.allocator, .{}));
 
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -213,11 +211,13 @@ test "a node tested for emptiness leaves its templates for the real render" {
         .templates = @as(?*anyopaque, &templates),
     };
     const node = block(&capture, Body);
-    try std.testing.expect(!node.is_empty_in(std.testing.allocator, &templates));
+    try std.testing.expect(!node.is_empty(std.testing.allocator, .{
+        .templates = &templates,
+    }));
     try std.testing.expectEqual(@as(u32, 0), templates.probing);
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
-    try node.render(&out.writer, std.testing.allocator);
+    try node.render(&out.writer, std.testing.allocator, .{});
     try std.testing.expectEqualStrings("<button>Send</button>", out.written());
     try std.testing.expect(!first_template(&templates, "Pill-0"));
 }
@@ -403,48 +403,30 @@ pub fn escape(w: *std.Io.Writer, text: []const u8) !void {
 
 /// A stack of `class` attributes as one merged class list — the consumer's
 /// resolver decides how conflicts settle.
-pub fn merge_classes(arena: std.mem.Allocator, parts: []const []const u8) ![]const u8 {
-    return class_merge.merge_classes(arena, parts);
+pub const ClassOptions = struct {
+    /// The class book the request carries (the consumer's own type), when the consumer's
+    /// merge reads one.
+    book: ?*const anyopaque = null,
+};
+
+pub fn merge_classes(arena: std.mem.Allocator, parts: []const []const u8, options: ClassOptions) ![]const u8 {
+    return class_merge.merge_classes(arena, parts, .{
+        .book = options.book,
+    });
 }
 
 /// Writes a merged class stack, escaped, into an attribute value the caller
 /// has already opened.
-pub fn write_merged(w: *std.Io.Writer, arena: std.mem.Allocator, parts: []const []const u8) !void {
+pub fn write_merged(w: *std.Io.Writer, arena: std.mem.Allocator, parts: []const []const u8, options: ClassOptions) !void {
     // A consumer that writes the merge itself (into the attribute, escaped) takes nothing
     // from the arena.
     if (@hasDecl(class_merge, "write_classes")) {
-        return class_merge.write_classes(w, parts);
+        return class_merge.write_classes(w, parts, .{
+            .book = options.book,
+        });
     }
 
-    try escape(w, try merge_classes(arena, parts));
-}
-
-/// `merge_classes` with the class book the request carries (`book`, the consumer's own
-/// type), when the consumer's merge reads one.
-pub fn merge_classes_in(
-    arena: std.mem.Allocator,
-    book: ?*const anyopaque,
-    parts: []const []const u8,
-) ![]const u8 {
-    if (@hasDecl(class_merge, "merge_classes_in")) {
-        return class_merge.merge_classes_in(arena, book, parts);
-    }
-
-    return merge_classes(arena, parts);
-}
-
-/// `write_merged` with the class book the request carries.
-pub fn write_merged_in(
-    w: *std.Io.Writer,
-    arena: std.mem.Allocator,
-    book: ?*const anyopaque,
-    parts: []const []const u8,
-) !void {
-    if (@hasDecl(class_merge, "write_classes_in")) {
-        return class_merge.write_classes_in(w, book, parts);
-    }
-
-    try write_merged(w, arena, parts);
+    try escape(w, try merge_classes(arena, parts, options));
 }
 
 /// The templates a page has written its prototype for, by id: the render keeps one per page
@@ -528,7 +510,7 @@ pub fn concat(arena: std.mem.Allocator, parts: []const []const u8) []const u8 {
 pub fn slot_argument(arena: std.mem.Allocator, wire: ?[]const u8, value: anytype) []const u8 {
     if (wire) |present| return present;
     // Markup is the render's; an expression only tests whether there is some.
-    if (@TypeOf(value) == Node) return if (value.is_empty(arena)) "null" else "true";
+    if (@TypeOf(value) == Node) return if (value.is_empty(arena, .{})) "null" else "true";
     if (@TypeOf(value) == ?Node) return if (value) |node| slot_argument(arena, null, node) else "undefined";
     // An optional prop left out is `undefined` to the expression, as in JavaScript.
     if (@typeInfo(@TypeOf(value)) == .optional) return if (value) |present| slot_argument(arena, null, present) else "undefined";
@@ -595,6 +577,8 @@ fn write_attr_value(w: *std.Io.Writer, name: []const u8, value: anytype) !void {
     try w.print(" {s}=\"", .{name});
     switch (@typeInfo(@TypeOf(value))) {
         .int, .comptime_int => try w.print("{d}", .{value}),
+        // A number as JavaScript writes it: `2`, not `2e0`.
+        .float, .comptime_float => try write_number(w, value),
         else => try escape(w, value),
     }
     try w.writeAll("\"");
@@ -1058,7 +1042,7 @@ test "write_wire_attr skips unset actions and omits an empty attribute" {
 test "merge_classes delegates to the consumer's class_merge module" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const merged = try merge_classes(arena.allocator(), &.{ "a", "b" });
+    const merged = try merge_classes(arena.allocator(), &.{ "a", "b" }, .{});
     try std.testing.expect(merged.len >= 1);
 }
 
@@ -1286,4 +1270,11 @@ test "a slot argument is the caller's wire, else the value as JSON" {
     try std.testing.expectEqualStrings("undefined", slot_argument(a, null, @as(?[]const u8, null)));
     try std.testing.expectEqualStrings("\"x\"", slot_argument(a, null, @as(?[]const u8, "x")));
     try std.testing.expectEqualStrings("true", slot_argument(a, null, true));
+}
+
+test "a number attribute merged onto a slot's child is written as JavaScript writes it" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const merged = merge_slot_attr(arena.allocator(), "<button>x</button>", "tabindex", @as(f64, 2));
+    try std.testing.expectEqualStrings("<button tabindex=\"2\">x</button>", merged);
 }

@@ -10,7 +10,7 @@ fn contains(source: []const u8, expected: []const u8) !void {
 }
 
 fn lower(a: std.mem.Allocator, source: []const u8) ![]const u8 {
-    const module = try pjsx.compiler.createPjsxModule(a, source, "Example.ptsx");
+    const module = try pjsx.compiler.createPjsxModule(a, source, "Example.ptsx", .{});
     const program = try pjsx.targets.zig.Program.init(a, &.{module});
     return program.lower(a, "Example");
 }
@@ -25,7 +25,7 @@ test "props derive from annotations and destructuring without implicit defaults"
         \\  return <div>{amount}{enabled && <b>On</b>}{label}</div>;
         \\}
     ;
-    const parsed = try pjsx.analyze.parsePjsx(a, source, "Example.ptsx");
+    const parsed = try pjsx.analyze.parsePjsx(a, source, "Example.ptsx", .{});
     try std.testing.expectEqual(@as(f64, 1.25), parsed.schema.get("amount").?.default.?.number);
     try std.testing.expect(!parsed.schema.get("label").?.optional);
     try std.testing.expect(parsed.schema.get("enabled").?.default == null);
@@ -44,7 +44,7 @@ test "unannotated destructuring infers optional widened primitives" {
     defer arena.deinit();
     const parsed = try pjsx.analyze.parsePjsx(arena.allocator(),
         \\export function Example({ amount = -1.25, label = "Hi", enabled = false }) { return <div>{label}</div>; }
-    , "Example.ptsx");
+    , "Example.ptsx", .{});
     try std.testing.expectEqual(@as(f64, -1.25), parsed.schema.get("amount").?.default.?.number);
     try std.testing.expect(parsed.schema.get("label").?.optional);
     try std.testing.expect(parsed.schema.get("label").?.values == null);
@@ -73,10 +73,12 @@ test "imported interfaces keyof and intersections preserve narrowed fields" {
         .context = &context,
         .load = Imports.load,
     };
-    const parsed = try pjsx.analyze.parsePjsxWithResolver(arena.allocator(),
+    const parsed = try pjsx.analyze.parsePjsx(arena.allocator(),
         \\import type { Props } from "./types";
         \\export function Example({ size, hidden }: Props) { return <div>{size}{hidden && <b>Hidden</b>}</div>; }
-    , "Example.ptsx", resolver);
+    , "Example.ptsx", .{
+        .resolver = resolver,
+    });
     try std.testing.expectEqual(@as(usize, 2), parsed.schema.count());
     const values = parsed.schema.get("size").?.values.?;
     try std.testing.expectEqual(@as(usize, 1), values.len);
@@ -91,7 +93,7 @@ test "IR JSON retains union alternatives literal numbers and variadic tuple cons
         \\type Option = { value: number; label: string };
         \\type Props = ({ mode: "a"; count: 1 | 2 } | { mode: "b"; label: string }) & { options: readonly [Option, Option, ...Option[]] };
         \\export function Example({ mode }: Props) { return <div>{mode}</div>; }
-    , "Example.ptsx");
+    , "Example.ptsx", .{});
     const contract = module.component.props_type.?;
     try std.testing.expect(contract.kind == .@"union");
     try std.testing.expectEqual(@as(usize, 2), contract.members.len);
@@ -114,9 +116,7 @@ test "DOM props stay live, a computed default is evaluated once, and typed guard
         \\export function Example({ label = nextLabel(), enabled, items }: Props) {
         \\  return <div title={label}>{enabled && <b>On</b>}{items.map(item => <i>{item.label && <b>Label</b>}{item.enabled && <b>On</b>}</i>)}</div>;
         \\}
-    , .{
-        .filename = "Example.ptsx",
-    });
+    , "Example.ptsx", .{});
     try contains(output.code, "let $$p$d_label;");
     try contains(output.code, "($$p$d_label || ($$p$d_label = [nextLabel()]))[0]");
     try contains(output.code, "enabled === true");
@@ -144,7 +144,7 @@ test "unsupported tuple shapes and Zig defaults fail instead of silently changin
     const a = arena.allocator();
     try std.testing.expectError(error.Pjsx, pjsx.compiler.createPjsxModule(a,
         \\export function Example({ value }: { value: string | [boolean, number] }) { return <div />; }
-    , "Example.ptsx"));
+    , "Example.ptsx", .{}));
     try contains(pjsx.lastError(), "tuple");
     try std.testing.expectError(error.Pjsx, lower(a,
         \\export function Example({ value = next() }: { value?: number }) { return <div>{value}</div>; }
@@ -162,12 +162,12 @@ test "a broad string union stays a string and a guard narrows a child prop" {
     const a = arena.allocator();
     const leaf = try pjsx.compiler.createPjsxModule(a,
         \\export function Leaf({ label }: { label: string | "special" }) { return <span>{label}</span>; }
-    , "Leaf.ptsx");
+    , "Leaf.ptsx", .{});
     try std.testing.expect(leaf.component.props.get("label").?.values == null);
     const example = try pjsx.compiler.createPjsxModule(a,
         \\import { Leaf } from "./Leaf.ptsx";
         \\export function Example({ label }: { label?: string }) { return <div>{label && <Leaf label={label} />}</div>; }
-    , "Example.ptsx");
+    , "Example.ptsx", .{});
     const program = try pjsx.targets.zig.Program.init(a, &.{ leaf, example });
     const code = try program.lower(a, "Example");
     try contains(code, ".label = (props.label).?");

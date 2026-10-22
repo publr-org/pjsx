@@ -113,8 +113,8 @@ const Emitted = struct {
     key: ?Str,
 };
 
-pub fn transformPjsx(allocator: Allocator, source: []const u8, opts: Options) Error!Result {
-    const filename = opts.filename orelse "component.ptsx";
+pub fn transformPjsx(allocator: Allocator, source: []const u8, options: Options) Error!Result {
+    const filename = options.filename orelse "component.ptsx";
     const program = parser.parse(allocator, source, filename) catch |e| switch (e) {
         error.Pjsx => {
             const message = try allocator.dupe(u8, err.message());
@@ -125,7 +125,7 @@ pub fn transformPjsx(allocator: Allocator, source: []const u8, opts: Options) Er
     var t = Transformer{
         .a = allocator,
         .source = source,
-        .resolver = opts.resolver,
+        .resolver = options.resolver,
         .filename = filename,
         .program = program,
         .used = util.StringSet.init(allocator),
@@ -133,7 +133,7 @@ pub fn transformPjsx(allocator: Allocator, source: []const u8, opts: Options) Er
     var symbol_index: usize = 0;
     while (std.mem.indexOf(u8, source, t.runtime_name) != null) : (symbol_index += 1)
         t.runtime_name = try std.fmt.allocPrint(allocator, "$$dom{d}", .{symbol_index});
-    return t.run(opts);
+    return t.run(options);
 }
 
 const Transformer = struct {
@@ -1267,7 +1267,7 @@ const Transformer = struct {
     /// The family factory and the forwarded exports, appended to the module;
     /// the carried statements are removed and the root component starts by
     /// creating its instance. Null when the module declares no family.
-    fn lowerFamily(self: *Transformer, opts: Options) Error!?Str {
+    fn lowerFamily(self: *Transformer, options: Options) Error!?Str {
         var declares_family = false;
         for (self.program.statements) |statement| {
             if (statement.type != .ExportNamedDeclaration) continue;
@@ -1280,7 +1280,7 @@ const Transformer = struct {
         }
         if (!declares_family) return null;
 
-        const stem = fileStem(opts.filename orelse "");
+        const stem = fileStem(options.filename orelse "");
         var root_fn: ?*Node = null;
         var first_component: ?*Node = null;
         for (self.program.statements) |statement| {
@@ -1403,13 +1403,13 @@ const Transformer = struct {
         return try self.f("const {s} = {s}.family({s}, () => {{\n{s}  return {{ {s} }};\n}});\n{s}", .{ family, self.runtime_name, try self.json(root_name), body.items, try util.join(self.a, members.items, ", "), forwards.items });
     }
 
-    fn run(self: *Transformer, opts: Options) Error!Result {
+    fn run(self: *Transformer, options: Options) Error!Result {
         try self.findComponents(self.program, 0);
         std.mem.sort(Edit, self.ident_edits.items, {}, lessEdit);
 
         var roots: NodeList = .empty;
         try self.findRoots(self.program, &roots);
-        const family_tail = try self.lowerFamily(opts);
+        const family_tail = try self.lowerFamily(options);
         std.mem.sort(Edit, self.ident_edits.items, {}, lessEdit);
 
         var overwrites: std.ArrayList(Edit) = .empty;
@@ -1449,8 +1449,8 @@ const Transformer = struct {
         // The family block leads the module: imports hoist above it, and the
         // root const that wraps the component needs it at evaluation.
         if (family_tail) |tail| code = try util.concat(self.a, &.{ tail, code });
-        if (!opts.bare and self.used.count() > 0) {
-            const import_line = try self.f("import * as {s} from {s};\n", .{ self.runtime_name, try self.json(opts.runtime_import orelse "publr/dom") });
+        if (!options.bare and self.used.count() > 0) {
+            const import_line = try self.f("import * as {s} from {s};\n", .{ self.runtime_name, try self.json(options.runtime_import orelse "publr/dom") });
             code = try util.concat(self.a, &.{ import_line, code });
         }
         return .{
@@ -1483,9 +1483,7 @@ const testing = std.testing;
 /// The reference tests observe `transformPjsxToDom` output (canonicalize →
 /// transform → type strip with oxc's paren normalisation); mirror that.
 fn transformTest(a: Allocator, source: Str, filename: Str) !Str {
-    const result = try @import("dom.zig").transformPjsxToDom(a, source, .{
-        .filename = filename,
-    });
+    const result = try @import("dom.zig").transformPjsxToDom(a, source, filename, .{});
     return result.code;
 }
 

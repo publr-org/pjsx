@@ -3,6 +3,11 @@
 //! resolver (the demo wires the Publr JIT's).
 const std = @import("std");
 
-pub fn merge_classes(arena: std.mem.Allocator, parts: []const []const u8) ![]const u8 {
+pub const Options = struct {
+    book: ?*const anyopaque = null,
+};
+
+pub fn merge_classes(arena: std.mem.Allocator, parts: []const []const u8, options: Options) ![]const u8 {
+    _ = options;
     return std.mem.join(arena, " ", parts);
 }

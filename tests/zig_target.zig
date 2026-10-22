@@ -33,7 +33,9 @@ test "every design-system component lowers through the zig target" {
             !std.mem.endsWith(u8, entry.basename, ".pjsx")) continue;
         const source = try dir.readFileAlloc(io, entry.path, arena, .limited(4 << 20));
         const label = try std.fs.path.join(arena, &.{ ds_root, entry.path });
-        const module = pjsx.compiler.createPjsxModuleWithResolver(arena, source, label, resolver.resolver()) catch |e| {
+        const module = pjsx.compiler.createPjsxModule(arena, source, label, .{
+            .resolver = resolver.resolver(),
+        }) catch |e| {
             std.debug.print("corpus: {s} does not compile: {s}\n", .{ entry.path, pjsx.lastError() });
             return e;
         };

@@ -79,7 +79,6 @@ pub const ast = struct {
 /// Component model extraction (the TypeScript `ast.ts`).
 pub const analyze = struct {
     pub const parsePjsx = analyze_module.parsePjsx;
-    pub const parsePjsxWithResolver = analyze_module.parsePjsxWithResolver;
     pub const collectClassTokens = analyze_module.collectClassTokens;
     pub const collectSourceClassTokens = analyze_module.collectSourceClassTokens;
     pub const collectFiniteStringMaps = analyze_module.collectFiniteStringMaps;
@@ -103,7 +102,6 @@ pub const analyze = struct {
 pub const compiler = struct {
     pub const PJSX_COMPILER_API_VERSION = compiler_module.PJSX_COMPILER_API_VERSION;
     pub const createPjsxModule = compiler_module.createPjsxModule;
-    pub const createPjsxModuleWithResolver = compiler_module.createPjsxModuleWithResolver;
     pub const compilePjsx = compiler_module.compilePjsx;
     pub const collectPjsxClasses = compiler_module.collectPjsxClasses;
     pub const writeJson = compiler_module.writeJson;
@@ -165,7 +163,6 @@ pub const minify = struct {
 pub const targets = struct {
     pub const dom = struct {
         pub const lowerPjsxToDom = targets_dom_module.lowerPjsxToDom;
-        pub const lowerPjsxToDomWithResolver = targets_dom_module.lowerPjsxToDomWithResolver;
         pub const domTarget = targets_dom_module.domTarget;
         pub const DomTarget = targets_dom_module.DomTarget;
         pub const DomTargetOptions = targets_dom_module.DomTargetOptions;
@@ -194,7 +191,7 @@ test {
         parser_module,    canonicalize_module, js_module,              analyze_module,
         transform_module, strip_types_module,  dom_module,             compiler_module,
         minify_module,    targets_dom_module,  targets_plugins_module, targets_zig_module,
-        store_module,     portable,            semantics,
+        store_module,     portable,            semantics,              @import("early_returns.zig"),
     }) |module| std.testing.refAllDecls(module);
 }
 

@@ -315,7 +315,7 @@ fn expectPrints(source: []const u8, expected: []const u8) !void {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const module = try compiler.createPjsxModule(a, source, "Probe.ptsx");
+    const module = try compiler.createPjsxModule(a, source, "Probe.ptsx", .{});
     const root = module.component.root.element;
     const value = root.attributes[0].value();
     try std.testing.expectEqualStrings(expected, try print(a, value));
@@ -360,7 +360,7 @@ test "references are the expression's free names, without an arrow function's ow
         \\export function Probe({ label }: { label: string }) {
         \\  return <div title={state.items.some((item) => item.on) ? label : TITLE} />;
         \\}
-    , "Probe.ptsx");
+    , "Probe.ptsx", .{});
     const found = try references(a, module.component.root.element.attributes[0].value());
     try std.testing.expectEqual(@as(usize, 3), found.len);
     try std.testing.expectEqualStrings("state", found[0].name);

@@ -38,7 +38,7 @@ pub fn expressionEnd(allocator: Allocator, source: []const u8, filename: []const
     };
     try p.advance();
     try p.expectPunct("{");
-    if (!p.isPunct("}")) _ = try p.parseExpression(false);
+    if (!p.isPunct("}")) _ = try p.parseExpression(.{});
     if (!p.isPunct("}")) return p.unexpected();
     return p.tok.start;
 }
@@ -65,6 +65,12 @@ pub fn parseWithTypeRanges(allocator: Allocator, source: []const u8, filename: [
         .ts_ranges = try p.ts_ranges.toOwnedSlice(allocator),
     };
 }
+
+/// The grammar's `[In]` parameter, off inside a `for (... in ...)` head.
+const ExpressionOptions = struct {
+    /// `in` is not a binary operator here.
+    no_in: bool = false,
+};
 
 pub const Parser = struct {
     allocator: Allocator,
@@ -249,7 +255,7 @@ pub const Parser = struct {
             const text = self.tok.text;
             if (util.eql(text, "var") or util.eql(text, "const") or (util.eql(text, "let") and try self.letIsDeclaration())) {
                 if (util.eql(text, "const") and try self.peekIsAfter(isEnumToken)) return self.parseTsSkipStatement();
-                const decl = try self.parseVariableDeclaration(false);
+                const decl = try self.parseVariableDeclaration(.{});
                 try self.consumeSemicolon();
                 return self.finish(decl);
             }
@@ -291,7 +297,7 @@ pub const Parser = struct {
             }
         }
         const statement = try self.node(.ExpressionStatement, start);
-        statement.expression = try self.parseExpression(false);
+        statement.expression = try self.parseExpression(.{});
         try self.consumeSemicolon();
         return self.finish(statement);
     }
@@ -366,7 +372,7 @@ pub const Parser = struct {
                     try self.skipEnum();
                     return self.finish(decl);
                 }
-                _ = try self.parseVariableDeclaration(false);
+                _ = try self.parseVariableDeclaration(.{});
                 try self.consumeSemicolon();
                 return self.finish(decl);
             }
@@ -493,7 +499,8 @@ pub const Parser = struct {
         return self.finish(block);
     }
 
-    fn parseVariableDeclaration(self: *Parser, no_in: bool) Error!*Node {
+    fn parseVariableDeclaration(self: *Parser, options: ExpressionOptions) Error!*Node {
+        const no_in = options.no_in;
         const decl = try self.node(.VariableDeclaration, self.tok.start);
         decl.kind = if (util.eql(self.tok.text, "const")) .@"const" else if (util.eql(self.tok.text, "let")) .let else if (util.eql(self.tok.text, "using")) .using else .@"var";
         try self.advance();
@@ -507,7 +514,9 @@ pub const Parser = struct {
                 id.end = self.prev_end;
             }
             declarator.id = id;
-            if (try self.eatPunct("=")) declarator.init = try self.parseAssignment(no_in);
+            if (try self.eatPunct("=")) declarator.init = try self.parseAssignment(.{
+                .no_in = no_in,
+            });
             try list.append(self.allocator, self.finish(declarator));
             if (!try self.eatPunct(",")) break;
         }
@@ -519,7 +528,7 @@ pub const Parser = struct {
         const n = try self.node(.IfStatement, self.tok.start);
         try self.advance();
         try self.expectPunct("(");
-        n.test_ = try self.parseExpression(false);
+        n.test_ = try self.parseExpression(.{});
         try self.expectPunct(")");
         n.consequent = try self.parseStatement();
         if (try self.eatIdent("else")) n.alternate = try self.parseStatement();
@@ -530,7 +539,7 @@ pub const Parser = struct {
         const n = try self.node(.WhileStatement, self.tok.start);
         try self.advance();
         try self.expectPunct("(");
-        n.test_ = try self.parseExpression(false);
+        n.test_ = try self.parseExpression(.{});
         try self.expectPunct(")");
         n.body = try self.parseStatement();
         return self.finish(n);
@@ -542,7 +551,7 @@ pub const Parser = struct {
         n.body = try self.parseStatement();
         try self.expectIdent("while");
         try self.expectPunct("(");
-        n.test_ = try self.parseExpression(false);
+        n.test_ = try self.parseExpression(.{});
         try self.expectPunct(")");
         _ = try self.eatPunct(";");
         return self.finish(n);
@@ -558,9 +567,13 @@ pub const Parser = struct {
         if (self.isPunct(";")) {
             // no init
         } else if (self.isIdent("var") or self.isIdent("const") or (self.isIdent("let") and try self.letIsDeclaration())) {
-            init = try self.parseVariableDeclaration(true);
+            init = try self.parseVariableDeclaration(.{
+                .no_in = true,
+            });
         } else {
-            init = try self.parseExpression(true);
+            init = try self.parseExpression(.{
+                .no_in = true,
+            });
         }
         if (init != null and (self.isIdent("of") or self.isIdent("in"))) {
             const is_of = self.isIdent("of");
@@ -568,7 +581,7 @@ pub const Parser = struct {
             const n = try self.node(if (is_of) .ForOfStatement else .ForInStatement, start);
             n.await_ = is_await;
             n.left = if (init.?.type == .VariableDeclaration) init.? else try self.toPattern(init.?);
-            n.right = if (is_of) try self.parseAssignment(false) else try self.parseExpression(false);
+            n.right = if (is_of) try self.parseAssignment(.{}) else try self.parseExpression(.{});
             try self.expectPunct(")");
             n.body = try self.parseStatement();
             return self.finish(n);
@@ -576,9 +589,9 @@ pub const Parser = struct {
         const n = try self.node(.ForStatement, start);
         n.init = init;
         try self.expectPunct(";");
-        if (!self.isPunct(";")) n.test_ = try self.parseExpression(false);
+        if (!self.isPunct(";")) n.test_ = try self.parseExpression(.{});
         try self.expectPunct(";");
-        if (!self.isPunct(")")) n.update = try self.parseExpression(false);
+        if (!self.isPunct(")")) n.update = try self.parseExpression(.{});
         try self.expectPunct(")");
         n.body = try self.parseStatement();
         return self.finish(n);
@@ -588,7 +601,7 @@ pub const Parser = struct {
         const n = try self.node(.ReturnStatement, self.tok.start);
         try self.advance();
         if (!self.isPunct(";") and !self.isPunct("}") and self.tok.kind != .eof and !self.tok.newline_before) {
-            n.argument = try self.parseExpression(false);
+            n.argument = try self.parseExpression(.{});
         }
         try self.consumeSemicolon();
         return self.finish(n);
@@ -607,7 +620,7 @@ pub const Parser = struct {
     fn parseThrow(self: *Parser) Error!*Node {
         const n = try self.node(.ThrowStatement, self.tok.start);
         try self.advance();
-        n.argument = try self.parseExpression(false);
+        n.argument = try self.parseExpression(.{});
         try self.consumeSemicolon();
         return self.finish(n);
     }
@@ -639,14 +652,14 @@ pub const Parser = struct {
         const n = try self.node(.SwitchStatement, self.tok.start);
         try self.advance();
         try self.expectPunct("(");
-        n.discriminant = try self.parseExpression(false);
+        n.discriminant = try self.parseExpression(.{});
         try self.expectPunct(")");
         try self.expectPunct("{");
         var cases: NodeList = .empty;
         while (!self.isPunct("}")) {
             const case = try self.node(.SwitchCase, self.tok.start);
             if (try self.eatIdent("case")) {
-                case.test_ = try self.parseExpression(false);
+                case.test_ = try self.parseExpression(.{});
             } else {
                 try self.expectIdent("default");
             }
@@ -691,7 +704,7 @@ pub const Parser = struct {
             if (try self.peekIsAfter(isEqualsToken)) {
                 _ = try self.parseIdentifier();
                 try self.expectPunct("=");
-                _ = try self.parseExpression(false);
+                _ = try self.parseExpression(.{});
                 try self.consumeSemicolon();
                 const decl = try self.node(.TSDeclaration, n.start);
                 return self.finish(decl);
@@ -785,7 +798,7 @@ pub const Parser = struct {
             } else if (self.isIdent("interface") and try self.peekIsAfter(isIdentNoNewline)) {
                 n.declaration = try self.parseTsSkipStatement();
             } else {
-                n.declaration = try self.parseAssignment(false);
+                n.declaration = try self.parseAssignment(.{});
                 try self.consumeSemicolon();
             }
             return self.finish(n);
@@ -803,7 +816,7 @@ pub const Parser = struct {
         if (self.isPunct("=")) {
             // `export = x;`
             try self.advance();
-            _ = try self.parseExpression(false);
+            _ = try self.parseExpression(.{});
             try self.consumeSemicolon();
             return self.finish(try self.node(.TSDeclaration, start));
         }
@@ -853,7 +866,7 @@ pub const Parser = struct {
                 n.export_kind = .type;
                 return self.finish(n);
             }
-            const decl = try self.parseVariableDeclaration(false);
+            const decl = try self.parseVariableDeclaration(.{});
             try self.consumeSemicolon();
             n.declaration = self.finish(decl);
             return self.finish(n);
@@ -987,7 +1000,7 @@ pub const Parser = struct {
         if (try self.eatPunct("=")) {
             const assign = try self.node(.AssignmentPattern, start);
             assign.left = target;
-            assign.right = try self.parseAssignment(false);
+            assign.right = try self.parseAssignment(.{});
             return self.finish(assign);
         }
         return target;
@@ -1007,7 +1020,7 @@ pub const Parser = struct {
         if (try self.eatPunct("=")) {
             const assign = try self.node(.AssignmentPattern, start);
             assign.left = target;
-            assign.right = try self.parseAssignment(false);
+            assign.right = try self.parseAssignment(.{});
             return self.finish(assign);
         }
         return target;
@@ -1054,7 +1067,7 @@ pub const Parser = struct {
                 if (self.isPunct("[")) {
                     try self.advance();
                     prop.computed = true;
-                    prop.key = try self.parseAssignment(false);
+                    prop.key = try self.parseAssignment(.{});
                     try self.expectPunct("]");
                 } else {
                     prop.key = try self.parsePropertyKey();
@@ -1069,7 +1082,7 @@ pub const Parser = struct {
                     if (try self.eatPunct("=")) {
                         const assign = try self.node(.AssignmentPattern, key.start);
                         assign.left = value;
-                        assign.right = try self.parseAssignment(false);
+                        assign.right = try self.parseAssignment(.{});
                         prop.value_node = self.finish(assign);
                     } else {
                         prop.value_node = value;
@@ -1092,7 +1105,7 @@ pub const Parser = struct {
         }
         if (self.isPunct("<")) n.type_parameters = try self.parseTypeParametersNode();
         if (try self.eatIdent("extends")) {
-            n.super_class = try self.parseLeftHandSideNoCall(false);
+            n.super_class = try self.parseLeftHandSideNoCall();
             if (self.isPunct("<")) try self.skipTypeArguments();
         }
         if (self.isIdent("implements")) {
@@ -1172,7 +1185,7 @@ pub const Parser = struct {
         if (self.isPunct("[")) {
             try self.advance();
             computed = true;
-            key = try self.parseAssignment(false);
+            key = try self.parseAssignment(.{});
             try self.expectPunct("]");
         } else if (self.tok.kind == .private_name) {
             key = try self.node(.PrivateIdentifier, self.tok.start);
@@ -1208,7 +1221,7 @@ pub const Parser = struct {
         prop.computed = computed;
         prop.static = is_static;
         if (self.isPunct(":")) prop.type_annotation = try self.parseTypeAnnotation();
-        if (try self.eatPunct("=")) prop.value_node = try self.parseAssignment(false);
+        if (try self.eatPunct("=")) prop.value_node = try self.parseAssignment(.{});
         try self.consumeSemicolon();
         if (is_declare) {
             try self.recordTs(start, self.prev_end);
@@ -1232,15 +1245,20 @@ pub const Parser = struct {
 
     // ── Expressions ────────────────────────────────────────────────────────
 
-    fn parseExpression(self: *Parser, no_in: bool) Error!*Node {
+    fn parseExpression(self: *Parser, options: ExpressionOptions) Error!*Node {
+        const no_in = options.no_in;
         const start = self.tok.start;
-        const first = try self.parseAssignment(no_in);
+        const first = try self.parseAssignment(.{
+            .no_in = no_in,
+        });
         if (!self.isPunct(",")) return first;
         const seq = try self.node(.SequenceExpression, start);
         var list: NodeList = .empty;
         try list.append(self.allocator, first);
         while (try self.eatPunct(",")) {
-            try list.append(self.allocator, try self.parseAssignment(no_in));
+            try list.append(self.allocator, try self.parseAssignment(.{
+                .no_in = no_in,
+            }));
         }
         seq.expressions = try list.toOwnedSlice(self.allocator);
         return self.finish(seq);
@@ -1254,7 +1272,8 @@ pub const Parser = struct {
         return false;
     }
 
-    fn parseAssignment(self: *Parser, no_in: bool) Error!*Node {
+    fn parseAssignment(self: *Parser, options: ExpressionOptions) Error!*Node {
+        const no_in = options.no_in;
         const start = self.tok.start;
         // yield
         if (self.isIdent("yield") and self.in_generator) {
@@ -1262,7 +1281,9 @@ pub const Parser = struct {
             try self.advance();
             if (try self.eatPunct("*")) n.generator = true;
             if (!self.tok.newline_before and !self.isPunct(")") and !self.isPunct("]") and !self.isPunct("}") and !self.isPunct(",") and !self.isPunct(";") and !self.isPunct(":") and self.tok.kind != .eof) {
-                n.argument = try self.parseAssignment(no_in);
+                n.argument = try self.parseAssignment(.{
+                    .no_in = no_in,
+                });
             }
             return self.finish(n);
         }
@@ -1275,7 +1296,9 @@ pub const Parser = struct {
             const n = try self.node(.AssignmentExpression, start);
             n.operator = op;
             n.left = if (util.eql(op, "=")) try self.toPattern(left) else left;
-            n.right = try self.parseAssignment(no_in);
+            n.right = try self.parseAssignment(.{
+                .no_in = no_in,
+            });
             return self.finish(n);
         }
         return left;
@@ -1362,7 +1385,9 @@ pub const Parser = struct {
             arrow.body = try self.parseBlock();
         } else {
             arrow.expression_body = true;
-            arrow.body = try self.parseAssignment(no_in);
+            arrow.body = try self.parseAssignment(.{
+                .no_in = no_in,
+            });
         }
         return self.finish(arrow);
     }
@@ -1374,9 +1399,11 @@ pub const Parser = struct {
         try self.advance();
         const n = try self.node(.ConditionalExpression, start);
         n.test_ = test_;
-        n.consequent = try self.parseAssignment(false);
+        n.consequent = try self.parseAssignment(.{});
         try self.expectPunct(":");
-        n.alternate = try self.parseAssignment(no_in);
+        n.alternate = try self.parseAssignment(.{
+            .no_in = no_in,
+        });
         return self.finish(n);
     }
 
@@ -1499,8 +1526,8 @@ pub const Parser = struct {
     }
 
     /// `new` expressions and member chains (no calls) — `extends` clauses / `new` callees.
-    fn parseLeftHandSideNoCall(self: *Parser, allow_call: bool) Error!*Node {
-        return self.parseCallTail(try self.parseMemberOrNew(), allow_call);
+    fn parseLeftHandSideNoCall(self: *Parser) Error!*Node {
+        return self.parseCallTail(try self.parseMemberOrNew(), false);
     }
 
     fn parseMemberOrNew(self: *Parser) Error!*Node {
@@ -1518,7 +1545,7 @@ pub const Parser = struct {
                 return self.finish(meta);
             }
             const n = try self.node(.NewExpression, start);
-            n.callee = try self.parseLeftHandSideNoCall(false);
+            n.callee = try self.parseLeftHandSideNoCall();
             if (self.isPunct("<") and try self.tryTypeArguments()) {}
             if (self.isPunct("(")) {
                 n.arguments = try self.parseArguments();
@@ -1538,10 +1565,10 @@ pub const Parser = struct {
             }
             const n = try self.node(.ImportExpression, start);
             try self.expectPunct("(");
-            n.source = try self.parseAssignment(false);
+            n.source = try self.parseAssignment(.{});
             if (try self.eatPunct(",")) {
                 if (!self.isPunct(")")) {
-                    _ = try self.parseAssignment(false);
+                    _ = try self.parseAssignment(.{});
                     _ = try self.eatPunct(",");
                 }
             }
@@ -1558,10 +1585,10 @@ pub const Parser = struct {
             if (self.isPunct("...")) {
                 const spread = try self.node(.SpreadElement, self.tok.start);
                 try self.advance();
-                spread.argument = try self.parseAssignment(false);
+                spread.argument = try self.parseAssignment(.{});
                 try list.append(self.allocator, self.finish(spread));
             } else {
-                try list.append(self.allocator, try self.parseAssignment(false));
+                try list.append(self.allocator, try self.parseAssignment(.{}));
             }
             if (!try self.eatPunct(",")) break;
         }
@@ -1608,7 +1635,7 @@ pub const Parser = struct {
                     n.object = expr;
                     n.computed = true;
                     n.optional = true;
-                    n.property = try self.parseExpression(false);
+                    n.property = try self.parseExpression(.{});
                     try self.expectPunct("]");
                     expr = self.finish(n);
                 } else {
@@ -1623,7 +1650,7 @@ pub const Parser = struct {
                 const n = try self.node(.MemberExpression, start);
                 n.object = expr;
                 n.computed = true;
-                n.property = try self.parseExpression(false);
+                n.property = try self.parseExpression(.{});
                 try self.expectPunct("]");
                 expr = self.finish(n);
             } else if (self.isPunct("(") and allow_call) {
@@ -1707,7 +1734,7 @@ pub const Parser = struct {
                 const t = self.tok.text;
                 if (util.eql(t, "(")) {
                     try self.advance();
-                    const inner = try self.parseExpression(false);
+                    const inner = try self.parseExpression(.{});
                     try self.expectPunct(")");
                     const n = try self.node(.ParenthesizedExpression, start);
                     n.expression = inner;
@@ -1797,7 +1824,7 @@ pub const Parser = struct {
                 break;
             }
             try self.advance();
-            try expressions.append(self.allocator, try self.parseExpression(false));
+            try expressions.append(self.allocator, try self.parseExpression(.{}));
             if (!self.isPunct("}")) return self.unexpected();
             self.tok = try self.lexer.rescanTemplateContinuation();
         }
@@ -1819,10 +1846,10 @@ pub const Parser = struct {
             if (self.isPunct("...")) {
                 const spread = try self.node(.SpreadElement, self.tok.start);
                 try self.advance();
-                spread.argument = try self.parseAssignment(false);
+                spread.argument = try self.parseAssignment(.{});
                 try list.append(self.allocator, self.finish(spread));
             } else {
-                try list.append(self.allocator, try self.parseAssignment(false));
+                try list.append(self.allocator, try self.parseAssignment(.{}));
             }
             if (!try self.eatPunct(",")) break;
         }
@@ -1852,7 +1879,7 @@ pub const Parser = struct {
             if (self.isPunct("...")) {
                 const spread = try self.node(.SpreadElement, start);
                 try self.advance();
-                spread.argument = try self.parseAssignment(false);
+                spread.argument = try self.parseAssignment(.{});
                 try list.append(self.allocator, self.finish(spread));
             } else {
                 const prop = try self.node(.Property, start);
@@ -1870,7 +1897,7 @@ pub const Parser = struct {
                 if (self.isPunct("[")) {
                     try self.advance();
                     prop.computed = true;
-                    prop.key = try self.parseAssignment(false);
+                    prop.key = try self.parseAssignment(.{});
                     try self.expectPunct("]");
                 } else {
                     prop.key = try self.parsePropertyKey();
@@ -1884,7 +1911,7 @@ pub const Parser = struct {
                     try self.parseFunctionRest(fn_node);
                     prop.value_node = self.finish(fn_node);
                 } else if (try self.eatPunct(":")) {
-                    prop.value_node = try self.parseAssignment(false);
+                    prop.value_node = try self.parseAssignment(.{});
                 } else {
                     const key = prop.key.?;
                     if (key.type != .Identifier or prop.computed) return self.unexpected();
@@ -1895,7 +1922,7 @@ pub const Parser = struct {
                         try self.advance();
                         const assign = try self.node(.AssignmentPattern, key.start);
                         assign.left = value;
-                        assign.right = try self.parseAssignment(false);
+                        assign.right = try self.parseAssignment(.{});
                         prop.value_node = self.finish(assign);
                     } else {
                         prop.value_node = value;
@@ -2344,7 +2371,7 @@ pub const Parser = struct {
             self.lexer.resetTo(self.tok.end);
             self.tok = try self.lexer.next();
             try self.expectPunct("...");
-            spread.argument = try self.parseAssignment(false);
+            spread.argument = try self.parseAssignment(.{});
             if (!self.isPunct("}")) return self.unexpected();
             spread.end = self.tok.end;
             try self.jsxTag();
@@ -2401,10 +2428,10 @@ pub const Parser = struct {
         } else if (self.isPunct("...")) {
             try self.advance();
             container.type = .JSXSpreadChild;
-            container.expression = try self.parseExpression(false);
+            container.expression = try self.parseExpression(.{});
             if (!self.isPunct("}")) return self.unexpected();
         } else {
-            container.expression = try self.parseExpression(false);
+            container.expression = try self.parseExpression(.{});
             if (!self.isPunct("}")) return self.unexpected();
         }
         container.end = self.tok.end;

@@ -1311,11 +1311,13 @@ fn importedFamilyBindings(allocator: Allocator, program: *Node) Error!?ImportedF
 
 // ── Entry ──────────────────────────────────────────────────────────────────
 
-pub fn parsePjsx(allocator: Allocator, source: []const u8, filename: []const u8) Error!ParsedModule {
-    return parsePjsxWithResolver(allocator, source, filename, null);
-}
+pub const Options = struct {
+    /// Resolves imported components' prop types; without it imports stay unchecked.
+    resolver: ?@import("types.zig").Resolver = null,
+};
 
-pub fn parsePjsxWithResolver(allocator: Allocator, source: []const u8, filename: []const u8, resolver: ?@import("types.zig").Resolver) Error!ParsedModule {
+pub fn parsePjsx(allocator: Allocator, source: []const u8, filename: []const u8, options: Options) Error!ParsedModule {
+    const resolver = options.resolver;
     const canonical = try canonicalize_mod.canonicalize(allocator, source);
     const program = parser.parse(allocator, canonical.code, filename) catch |e| switch (e) {
         error.OutOfMemory => return e,
@@ -1626,7 +1628,7 @@ test "parsePjsx extracts the component, schema and class tokens" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const parsed = parsePjsx(a, badge_source, "badge.pjsx") catch |e| {
+    const parsed = parsePjsx(a, badge_source, "badge.pjsx", .{}) catch |e| {
         std.debug.print("{s}\n", .{err.message()});
         return e;
     };
@@ -1681,9 +1683,9 @@ test "parsePjsx requires one component and derives an empty props contract" {
         \\export const fieldProps = {};
         \\export function Field() { return <div />; }
         \\export function FieldLabel() { return <label />; }
-    , "multi.ptsx"));
+    , "multi.ptsx", .{}));
     try std.testing.expect(util.indexOf(err.message(), "must export exactly one JSX component (found 2)") != null);
-    const widget = try parsePjsx(a, "export function Widget() { return <div />; }", "widget.ptsx");
+    const widget = try parsePjsx(a, "export function Widget() { return <div />; }", "widget.ptsx", .{});
     try std.testing.expectEqual(@as(usize, 0), widget.schema.count());
 }
 
@@ -1700,7 +1702,7 @@ test "reactive state analysis finds actions, refs and the wire name" {
         \\  const open = () => { state.open = true; };
         \\  return <section><button onClick={open} onKeydown={() => open(1)}>Open</button><div ref={panel} $$show={state.open} /></section>;
         \\}
-    , "text-demo.ptsx") catch |e| {
+    , "text-demo.ptsx", .{}) catch |e| {
         std.debug.print("{s}\n", .{err.message()});
         return e;
     };
@@ -1727,7 +1729,7 @@ test "family bindings and imported families are analyzed" {
         \\  state.open = startOpen;
         \\  return <div data-part="disclosure" />;
         \\}
-    , "Disclosure.ptsx") catch |e| {
+    , "Disclosure.ptsx", .{}) catch |e| {
         std.debug.print("{s}\n", .{err.message()});
         return e;
     };
@@ -1738,7 +1740,7 @@ test "family bindings and imported families are analyzed" {
         \\import { state, toggle } from "./Disclosure.ptsx";
         \\export const disclosureButtonProps = {};
         \\export function DisclosureButton() { return <button onClick={toggle} aria-expanded={state.open} />; }
-    , "DisclosureButton.ptsx");
+    , "DisclosureButton.ptsx", .{});
     try std.testing.expectEqualStrings("state", part.imported_family.?.state_local.?);
     try std.testing.expectEqualStrings("toggle", part.imported_family.?.action_locals.get("toggle").?);
 }
@@ -1754,7 +1756,7 @@ test "a family carries its private helper functions, never as actions" {
         \\function Helper() { return <span />; }
         \\export function relabel(count: number) { state.label = describe(count); }
         \\export function Counter() { return <div data-part="counter">{state.label}</div>; }
-    , "Counter.ptsx");
+    , "Counter.ptsx", .{});
     const family = root.family.?;
     var carried = util.StringSet.init(a);
     for (family.module_statements) |statement| {
@@ -1776,7 +1778,7 @@ test "finite string maps are collected from module-level literal objects" {
         \\const toneClass = { draft: "text-muted-foreground", published: "text-success" };
         \\export const dotProps = { tone: { type: "string", default: "draft" } };
         \\export function Dot({ tone }) { return <span class={toneClass[tone]} />; }
-    , "dot.ptsx");
+    , "dot.ptsx", .{});
     const maps = try collectFiniteStringMaps(a, parsed.program);
     try std.testing.expectEqualStrings("text-success", maps.get("toneClass").?.get("published").?);
     const classes = try collectClassTokens(a, &parsed);

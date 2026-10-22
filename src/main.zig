@@ -15,7 +15,8 @@ const pjsx = @import("pjsx");
 
 const Command = enum { dom, zig, behavior, @"dom-zig", @"dom-behavior", php, store, ir, classes, canonical, @"portable-dom", @"portable-zig", @"portable-php", @"portable-ir" };
 
-const Options = struct {
+/// The command line, parsed: what to compile and how.
+const Arguments = struct {
     command: Command,
     files: []const []const u8,
     runtime_import: ?[]const u8 = null,
@@ -27,11 +28,11 @@ fn usage() noreturn {
     std.process.exit(2);
 }
 
-fn parseArgs(arena: std.mem.Allocator, args: []const [:0]const u8) !Options {
+fn parseArgs(arena: std.mem.Allocator, args: []const [:0]const u8) !Arguments {
     if (args.len < 3) usage();
     const command = std.meta.stringToEnum(Command, args[1]) orelse usage();
     var files: std.ArrayList([]const u8) = .empty;
-    var options = Options{
+    var arguments = Arguments{
         .command = command,
         .files = &.{},
     };
@@ -41,11 +42,11 @@ fn parseArgs(arena: std.mem.Allocator, args: []const [:0]const u8) !Options {
         if (std.mem.eql(u8, arg, "--runtime-import")) {
             i += 1;
             if (i >= args.len) usage();
-            options.runtime_import = args[i];
+            arguments.runtime_import = args[i];
         } else if (std.mem.eql(u8, arg, "--out")) {
             i += 1;
             if (i >= args.len) usage();
-            options.out_dir = args[i];
+            arguments.out_dir = args[i];
         } else if (std.mem.startsWith(u8, arg, "--")) {
             usage();
         } else {
@@ -53,18 +54,18 @@ fn parseArgs(arena: std.mem.Allocator, args: []const [:0]const u8) !Options {
         }
     }
     if (files.items.len == 0) usage();
-    options.files = files.items;
-    return options;
+    arguments.files = files.items;
+    return arguments;
 }
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     // Everything the compiler allocates lives as long as the process.
     const arena = init.arena.allocator();
-    const options = try parseArgs(arena, try init.minimal.args.toSlice(arena));
+    const arguments = try parseArgs(arena, try init.minimal.args.toSlice(arena));
 
     const cwd = Io.Dir.cwd();
-    const out_dir: ?Io.Dir = if (options.out_dir) |dir| blk: {
+    const out_dir: ?Io.Dir = if (arguments.out_dir) |dir| blk: {
         cwd.createDirPath(io, dir) catch |e| std.process.fatal("pjsx: cannot create {s}: {t}", .{ dir, e });
         break :blk try cwd.openDir(io, dir, .{});
     } else null;
@@ -72,16 +73,16 @@ pub fn main(init: std.process.Init) !void {
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
 
-    for (options.files) |file| {
+    for (arguments.files) |file| {
         const source = cwd.readFileAlloc(io, file, arena, .limited(1 << 24)) catch |e| {
             std.process.fatal("pjsx: cannot read {s}: {t}", .{ file, e });
         };
         if (out_dir) |dir| {
             // Validation/lowering must succeed before replacing an existing artifact.
             var compiled: Io.Writer.Allocating = .init(arena);
-            try compileTo(io, arena, &compiled.writer, options, file, source);
+            try compileTo(io, arena, &compiled.writer, arguments, file, source);
             var name_buffer: [Io.Dir.max_name_bytes]u8 = undefined;
-            const name = try outputName(&name_buffer, options.command, file);
+            const name = try outputName(&name_buffer, arguments.command, file);
             const out_file = try dir.createFile(io, name, .{});
             defer out_file.close(io);
             var file_buffer: [4096]u8 = undefined;
@@ -89,7 +90,7 @@ pub fn main(init: std.process.Init) !void {
             try file_writer.interface.writeAll(compiled.written());
             try file_writer.interface.flush();
         } else {
-            try compileTo(io, arena, &stdout_writer.interface, options, file, source);
+            try compileTo(io, arena, &stdout_writer.interface, arguments, file, source);
         }
     }
     try stdout_writer.interface.flush(); // Don't forget to flush!
@@ -115,11 +116,11 @@ fn outputName(buffer: []u8, command: Command, file: []const u8) ![]const u8 {
 }
 
 /// Compile one module and stream the requested artifact into `writer`.
-fn compileTo(io: Io, arena: std.mem.Allocator, writer: *Io.Writer, options: Options, file: []const u8, source: []const u8) !void {
+fn compileTo(io: Io, arena: std.mem.Allocator, writer: *Io.Writer, arguments: Arguments, file: []const u8, source: []const u8) !void {
     var resolver = pjsx.FileResolver{
         .io = io,
     };
-    compile(arena, writer, options, file, source, resolver.resolver()) catch |e| switch (e) {
+    compile(arena, writer, arguments, file, source, resolver.resolver()) catch |e| switch (e) {
         // The diagnostic text is the contract (same as the TypeScript `Error`
         // message); print it verbatim rather than through the logger.
         error.Pjsx => {
@@ -134,60 +135,81 @@ fn compileTo(io: Io, arena: std.mem.Allocator, writer: *Io.Writer, options: Opti
     };
 }
 
-fn compile(arena: std.mem.Allocator, writer: *Io.Writer, options: Options, file: []const u8, source: []const u8, resolver: pjsx.TypeResolver) !void {
-    switch (options.command) {
+fn compile(arena: std.mem.Allocator, writer: *Io.Writer, arguments: Arguments, file: []const u8, source: []const u8, resolver: pjsx.TypeResolver) !void {
+    switch (arguments.command) {
         .@"portable-ir" => {
-            const program = try pjsx.portable.prepare(arena, source, file, resolver);
+            const program = try pjsx.portable.prepare(arena, source, file, .{
+                .resolver = resolver,
+            });
             try program.writeJson(writer);
             try writer.writeByte('\n');
         },
         .@"portable-dom", .@"portable-zig", .@"portable-php" => {
-            const program = try pjsx.portable.prepare(arena, source, file, resolver);
-            const target = if (options.command == .@"portable-dom") pjsx.portable.domTarget() else if (options.command == .@"portable-php") pjsx.portable.phpTarget() else pjsx.portable.zigTarget();
+            const program = try pjsx.portable.prepare(arena, source, file, .{
+                .resolver = resolver,
+            });
+            const target = if (arguments.command == .@"portable-dom") pjsx.portable.domTarget() else if (arguments.command == .@"portable-php") pjsx.portable.phpTarget() else pjsx.portable.zigTarget();
             try writer.writeAll(try program.emit(target, .{
-                .runtime_import = options.runtime_import orelse "publr/dom",
+                .runtime_import = arguments.runtime_import orelse "publr/dom",
             }));
         },
         .php => {
-            const program = try pjsx.portable.prepareServer(arena, source, file, resolver);
+            const program = try pjsx.portable.prepareServer(arena, source, file, .{
+                .resolver = resolver,
+            });
             try writer.writeAll(try program.emit(pjsx.portable.phpTarget(), .{}));
         },
         .canonical => try writer.writeAll((try pjsx.canonicalize(arena, source)).code),
-        .dom => try writer.writeAll((try pjsx.dom.transformPjsxToDom(arena, source, .{
-            .filename = file,
-            .runtime_import = options.runtime_import orelse "publr/dom",
+        .dom => try writer.writeAll((try pjsx.dom.transformPjsxToDom(arena, source, file, .{
+            .runtime_import = arguments.runtime_import orelse "publr/dom",
             .resolver = resolver,
         })).code),
         // Single-file mode: the compile set is just this module, so
         // cross-module component imports will not resolve here.
         .@"dom-zig" => {
-            const module = try pjsx.compiler.createPjsxModuleWithResolver(arena, source, file, resolver);
+            const module = try pjsx.compiler.createPjsxModule(arena, source, file, .{
+                .resolver = resolver,
+            });
             try writer.writeAll(try pjsx.compiled.lowerDOM(arena, module));
         },
         .@"dom-behavior" => {
-            const module = try pjsx.compiler.createPjsxModuleWithResolver(arena, source, file, resolver);
+            const module = try pjsx.compiler.createPjsxModule(arena, source, file, .{
+                .resolver = resolver,
+            });
             try writer.writeAll(try pjsx.compiled.behaviorDOM(arena, module));
         },
         .behavior => {
-            const module = try pjsx.compiler.createPjsxModuleWithResolver(arena, source, file, resolver);
+            const module = try pjsx.compiler.createPjsxModule(arena, source, file, .{
+                .resolver = resolver,
+            });
             try writer.writeAll(try pjsx.compiled.behavior(arena, module));
         },
         .zig => {
-            const module = try pjsx.compiler.createPjsxModuleWithResolver(arena, source, file, resolver);
-            try writer.writeAll(try pjsx.compiled.lowerWithResolver(arena, module, resolver));
+            const module = try pjsx.compiler.createPjsxModule(arena, source, file, .{
+                .resolver = resolver,
+            });
+            try writer.writeAll(try pjsx.compiled.lower(arena, module, .{
+                .resolver = resolver,
+            }));
         },
         .store => {
-            if (try pjsx.store.lowerParsedStoreRegistration(arena, &(try pjsx.analyze.parsePjsxWithResolver(arena, source, file, resolver)))) |registration| {
+            if (try pjsx.store.lowerParsedStoreRegistration(arena, &(try pjsx.analyze.parsePjsx(arena, source, file, .{
+                .resolver = resolver,
+            })))) |registration| {
                 try writer.writeAll(registration.code);
             }
         },
         .ir => {
-            const module = try pjsx.compiler.createPjsxModuleWithResolver(arena, source, file, resolver);
+            const module = try pjsx.compiler.createPjsxModule(arena, source, file, .{
+                .resolver = resolver,
+            });
             try pjsx.compiler.writeJson(arena, module, writer);
             try writer.writeByte('\n');
         },
         .classes => {
-            for ((try pjsx.compiler.createPjsxModuleWithResolver(arena, source, file, resolver)).classes) |class| {
+            for ((try pjsx.compiler.createPjsxModule(arena, source, file, .{
+                .resolver = resolver,
+            })).classes) |class| {
                 try writer.print("{s}\n", .{class});
             }
         },

@@ -10,16 +10,19 @@ const E = compiler.ExpressionIR;
 const N = compiler.NodeIR;
 const Error = err.Error || std.Io.Writer.Error;
 
+pub const Options = struct {
+    /// Resolves imported components' prop types.
+    resolver: ?@import("types.zig").Resolver = null,
+};
+
 pub fn lowerDOM(a: A, module: *const compiler.ModuleIR) Error!S {
-    return lowerTarget(a, module, false, null);
+    return lowerTarget(a, module, false, .{});
 }
-pub fn lower(a: A, module: *const compiler.ModuleIR) Error!S {
-    return lowerTarget(a, module, true, null);
+pub fn lower(a: A, module: *const compiler.ModuleIR, options: Options) Error!S {
+    return lowerTarget(a, module, true, options);
 }
-pub fn lowerWithResolver(a: A, module: *const compiler.ModuleIR, resolver: @import("types.zig").Resolver) Error!S {
-    return lowerTarget(a, module, true, resolver);
-}
-fn lowerTarget(a: A, module: *const compiler.ModuleIR, html_mode: bool, resolver: ?@import("types.zig").Resolver) Error!S {
+fn lowerTarget(a: A, module: *const compiler.ModuleIR, html_mode: bool, options: Options) Error!S {
+    const resolver = options.resolver;
     const static_only = html_mode and try @import("inline_html.zig").isStaticShell(a, module.source, module.filename);
     var g = Generator{
         .a = a,
@@ -37,7 +40,7 @@ fn lowerTarget(a: A, module: *const compiler.ModuleIR, html_mode: bool, resolver
         if (prop.optional and prop.default == null) return err.failMsg("pjsx: native JSON props require scalar defaults for optional fields; undefined is not transferable");
         if (prop.default_expression != null and prop.default == null) return err.failMsg("pjsx: native prop defaults must be scalar literals");
     }
-    const parsed = try @import("analyze.zig").parsePjsx(a, module.source, module.filename);
+    const parsed = try @import("analyze.zig").parsePjsx(a, module.source, module.filename, .{});
     if (parsed.component.fn_node.body) |body| for (body.statements) |statement| {
         switch (statement.type) {
             .ReturnStatement => break,
@@ -134,7 +137,7 @@ const Generator = struct {
                             if (property.key == null or !util.eql(property.key.?.name, "state")) continue;
                             const value = property.value_node orelse return fail("shared store state is missing");
                             const source = try std.fmt.allocPrint(g.a, "export function StoreSeed() {{ const seed = {s}; return <div />; }}", .{value.slice(loaded.code)});
-                            const seed = try compiler.createPjsxModule(g.a, source, "StoreSeed.ptsx");
+                            const seed = try compiler.createPjsxModule(g.a, source, "StoreSeed.ptsx", .{});
                             const initial = seed.component.locals[0].value;
                             if (!staticStoreState(initial)) return fail("native shared store initial state must contain only literal data");
                             return g.emitExpression(initial);
@@ -763,8 +766,8 @@ test "native operations generate SSR, seeded identities and only declared read e
         \\ const names = derived(() => rows.map(row => row.name));
         \\ return <><Loading fallback={<i>Wait</i>}><ul>{rows.map(row => <li key={row.id}>{row.name}</li>)}</ul></Loading></>;
         \\}
-    , "Users.ptsx");
-    const code = try lower(a, module);
+    , "Users.ptsx", .{});
+    const code = try lower(a, module, .{});
     for ([_]S{ "rt.nativeResult(@import(\"./backend.zig\").users", "data-p", "p:loading", "p:list", "rt.componentSeed", "pub fn dispatch", "rows" }) |part|
         try std.testing.expect(std.mem.indexOf(u8, code, part) != null);
     try std.testing.expect(std.mem.indexOf(u8, code, ").save") == null);
@@ -785,8 +788,8 @@ test "native roots require an explicit host and reserve their hydration attribut
         "import {Loading} from 'publr'; export function Root() { return <Loading><b>one</b></Loading>; }",
         "export function Root() { return <div data-p-store='custom' />; }",
     }) |source| {
-        const module = try compiler.createPjsxModule(a, source, "Root.ptsx");
-        try std.testing.expectError(error.Pjsx, lower(a, module));
+        const module = try compiler.createPjsxModule(a, source, "Root.ptsx", .{});
+        try std.testing.expectError(error.Pjsx, lower(a, module, .{}));
     }
 }
 
@@ -815,13 +818,17 @@ test "native imported shared store reads literal initial state without running b
         .context = &fixture,
         .load = Fixture.load,
     };
-    const module = try compiler.createPjsxModule(a, "import {counter as sharedCount} from './shared'; export function Counter() { return <output>{sharedCount.count}</output>; }", "Counter.ptsx");
-    const code = try lowerWithResolver(a, module, resolver);
+    const module = try compiler.createPjsxModule(a, "import {counter as sharedCount} from './shared'; export function Counter() { return <output>{sharedCount.count}</output>; }", "Counter.ptsx", .{});
+    const code = try lower(a, module, .{
+        .resolver = resolver,
+    });
     try std.testing.expect(std.mem.indexOf(u8, code, ".float = 7") != null);
     try std.testing.expect(std.mem.indexOf(u8, code, "data-p-text") != null);
     try std.testing.expect(std.mem.indexOf(u8, code, "createStore") == null);
     fixture.source = "import {createStore} from 'publr'; export const counter = createStore('Counter', () => ({state: {count: window.start}}));";
-    try std.testing.expectError(error.Pjsx, lowerWithResolver(a, module, resolver));
+    try std.testing.expectError(error.Pjsx, lower(a, module, .{
+        .resolver = resolver,
+    }));
 }
 
 test "display-only composition shares parent HTML bindings and preserves stateful children" {
@@ -841,15 +848,23 @@ test "display-only composition shares parent HTML bindings and preserves statefu
         .context = &context,
         .load = Fixture.load,
     };
-    const module = try compiler.createPjsxModuleWithResolver(a, "import { state } from 'publr'; import { Display } from './Display.ptsx'; export function Parent() { let count = state(0); function increment() { count++; } return <div><button onClick={increment}>Increment</button><Display value={count}/></div>; }", "Parent.ptsx", resolver);
-    const native = try lowerWithResolver(a, module, resolver);
+    const module = try compiler.createPjsxModule(a, "import { state } from 'publr'; import { Display } from './Display.ptsx'; export function Parent() { let count = state(0); function increment() { count++; } return <div><button onClick={increment}>Increment</button><Display value={count}/></div>; }", "Parent.ptsx", .{
+        .resolver = resolver,
+    });
+    const native = try lower(a, module, .{
+        .resolver = resolver,
+    });
     const companion = try behavior(a, module);
     try std.testing.expect(std.mem.indexOf(u8, native, "Display.zig") == null);
     try std.testing.expect(std.mem.indexOf(u8, native, "data-p-text") != null);
     try std.testing.expect(std.mem.indexOf(u8, companion, "$$html.child(") == null);
     try std.testing.expect(std.mem.indexOf(u8, companion, "() => count.read()") != null);
-    const static_module = try compiler.createPjsxModuleWithResolver(a, "import { Display } from './Display.ptsx'; export function Parent() { return <div><Display value={3}/></div>; }", "StaticParent.ptsx", resolver);
-    const static_native = try lowerWithResolver(a, static_module, resolver);
+    const static_module = try compiler.createPjsxModule(a, "import { Display } from './Display.ptsx'; export function Parent() { return <div><Display value={3}/></div>; }", "StaticParent.ptsx", .{
+        .resolver = resolver,
+    });
+    const static_native = try lower(a, static_module, .{
+        .resolver = resolver,
+    });
     try std.testing.expect(std.mem.indexOf(u8, static_native, "data-p-store") == null);
     try std.testing.expect(std.mem.indexOf(u8, try behavior(a, static_module), "$$html.register(") == null);
 }
@@ -858,16 +873,16 @@ test "static parent leaves native child boundaries intact without its own store"
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const module = try compiler.createPjsxModule(a, "import { Counter } from './Counter.ptsx'; export function Parent() { return <section><Counter initial={0}/><Counter initial={10}/></section>; }", "Parent.ptsx");
-    const native = try lower(a, module);
+    const module = try compiler.createPjsxModule(a, "import { Counter } from './Counter.ptsx'; export function Parent() { return <section><Counter initial={0}/><Counter initial={10}/></section>; }", "Parent.ptsx", .{});
+    const native = try lower(a, module, .{});
     const companion = try behavior(a, module);
     try std.testing.expect(std.mem.indexOf(u8, native, "data-p-store") == null);
     try std.testing.expect(std.mem.indexOf(u8, native, "data-p-component") == null);
     try std.testing.expect(std.mem.indexOf(u8, native, "Counter.zig") != null);
     try std.testing.expect(std.mem.indexOf(u8, companion, "$$html.register(") == null);
     try std.testing.expect(std.mem.indexOf(u8, companion, "Counter.behavior.js") != null);
-    const child = try compiler.createPjsxModule(a, "import { state } from 'publr'; export function Counter(props: { initial: number }) { let count = state(props.initial); function increment() { count++; } return <div><output>{count}</output><button onClick={increment}>Increment</button></div>; }", "Counter.ptsx");
-    try std.testing.expect(std.mem.indexOf(u8, try lower(a, child), "data-p-store") != null);
+    const child = try compiler.createPjsxModule(a, "import { state } from 'publr'; export function Counter(props: { initial: number }) { let count = state(props.initial); function increment() { count++; } return <div><output>{count}</output><button onClick={increment}>Increment</button></div>; }", "Counter.ptsx", .{});
+    try std.testing.expect(std.mem.indexOf(u8, try lower(a, child, .{}), "data-p-store") != null);
     try std.testing.expect(std.mem.indexOf(u8, try behavior(a, child), "$$html.register(") != null);
 }
 
@@ -883,8 +898,8 @@ test "mutation rendering is idle and never evaluates its write" {
         \\ function save() { saving(); }
         \\ return (<button onClick={save} disabled={saving.isPending}>{saving.isError ? "Failed" : saving.value ? "Saved" : "Save"}</button>);
         \\}
-    , "Save.ptsx");
-    const code = try lower(a, module);
+    , "Save.ptsx", .{});
+    const code = try lower(a, module, .{});
     try std.testing.expect(std.mem.indexOf(u8, code, "savePerson") == null);
     try std.testing.expect(std.mem.indexOf(u8, code, "isPending") != null);
     try std.testing.expect(std.mem.indexOf(u8, code, "V{ .bool = false }") != null);

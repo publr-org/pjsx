@@ -369,19 +369,22 @@ pub const Program = struct {
 
 /// Arena-owned typed program and lossless in-memory IR. Callers must supply the
 /// same validated prop domain to both targets; nullable props are not v1 scalars.
-pub fn prepare(a: std.mem.Allocator, source: []const u8, filename: []const u8, resolver: ?@import("types.zig").Resolver) Error!Program {
-    return prepareImpl(a, source, filename, resolver, false);
+pub const PrepareOptions = analyze.Options;
+
+pub fn prepare(a: std.mem.Allocator, source: []const u8, filename: []const u8, options: PrepareOptions) Error!Program {
+    return prepareImpl(a, source, filename, false, options);
 }
 
 /// PHP server extension: document templates, imported components with scalar
 /// props, and local scalar-store click/binding wires. Other constructs diagnose.
-pub fn prepareServer(a: std.mem.Allocator, source: []const u8, filename: []const u8, resolver: ?@import("types.zig").Resolver) Error!Program {
-    return prepareImpl(a, source, filename, resolver, true);
+pub fn prepareServer(a: std.mem.Allocator, source: []const u8, filename: []const u8, options: PrepareOptions) Error!Program {
+    return prepareImpl(a, source, filename, true, options);
 }
 
-fn prepareImpl(a: std.mem.Allocator, source: []const u8, filename: []const u8, resolver: ?@import("types.zig").Resolver, server: bool) Error!Program {
-    const parsed = try analyze.parsePjsxWithResolver(a, source, filename, resolver);
-    const module = try compiler.createPjsxModuleWithResolver(a, source, filename, resolver);
+fn prepareImpl(a: std.mem.Allocator, source: []const u8, filename: []const u8, server: bool, options: PrepareOptions) Error!Program {
+    const resolver = options.resolver;
+    const parsed = try analyze.parsePjsx(a, source, filename, options);
+    const module = try compiler.createPjsxModule(a, source, filename, options);
     // Never silently drop executable statements that the legacy component IR
     // doesn't represent. Browser-only modules retain the mechanical DOM API.
     for (parsed.component.fn_node.body.?.statements) |statement| {
@@ -421,7 +424,9 @@ fn prepareImpl(a: std.mem.Allocator, source: []const u8, filename: []const u8, r
             if (!util.hasPjsxExtension(entry.source)) continue;
             const loader = resolver orelse return err.fail("pjsx: {s}: component imports require a resolver", .{filename});
             const imported = (try loader.load(loader.context, a, filename, entry.source)) orelse return err.fail("pjsx: {s}: component module not found: {s}", .{ filename, entry.source });
-            const child = try analyze.parsePjsxWithResolver(a, imported.code, imported.filename, resolver);
+            const child = try analyze.parsePjsx(a, imported.code, imported.filename, .{
+                .resolver = resolver,
+            });
             for (entry.names) |binding| {
                 if (binding.type_only) continue;
                 if (!util.eql(binding.imported, child.component.name)) return err.fail("pjsx: {s}: {s} does not export component {s}", .{ filename, entry.source, binding.imported });
@@ -686,7 +691,7 @@ test "portable target preparation resolves operators and emits from IR without r
         \\  const show = a + b <= 0.3;
         \\  return <span>{show ? "Shown" : "Hidden"}</span>;
         \\}
-    , "Example.ptsx", null);
+    , "Example.ptsx", .{});
     var operations = p.operations.valueIterator();
     var add = false;
     var less_equal = false;
@@ -720,7 +725,7 @@ test "portable profiles reject unrepresented effects, coercions and recursive he
     for (sources) |source| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
-        try std.testing.expectError(error.Pjsx, prepare(arena.allocator(), source, "rejected.ptsx", null));
+        try std.testing.expectError(error.Pjsx, prepare(arena.allocator(), source, "rejected.ptsx", .{}));
         try std.testing.expect(std.mem.indexOf(u8, err.message(), "rejected.ptsx") != null);
     }
 }
@@ -734,7 +739,7 @@ test "portable JSON carries lossless defaults and resolvable typed expression pa
         \\  const result = a + 0.2;
         \\  return <span data-value={result}>{`${a}:${result}`}</span>;
         \\}
-    , "Example.ptsx", null);
+    , "Example.ptsx", .{});
     var out: std.Io.Writer.Allocating = .init(a);
     try p.writeJson(&out.writer);
     const value = try std.json.parseFromSliceLeaky(std.json.Value, a, out.written(), .{});
@@ -759,8 +764,8 @@ test "PHP document extension is explicit and cannot masquerade as the scalar pro
     defer arena.deinit();
     const a = arena.allocator();
     const source = "export function Page() { return <html><head><script type=\"module\" src=\"/app.js\" /></head><body class=\"page\">Hello</body></html>; }";
-    try std.testing.expectError(error.Pjsx, prepare(a, source, "Page.ptsx", null));
-    const program = try prepareServer(a, source, "Page.ptsx", null);
+    try std.testing.expectError(error.Pjsx, prepare(a, source, "Page.ptsx", .{}));
+    const program = try prepareServer(a, source, "Page.ptsx", .{});
     const php = try program.emit(phpTarget(), .{});
     try std.testing.expect(std.mem.indexOf(u8, php, "<!doctype html>") != null);
     try std.testing.expectError(error.Pjsx, program.emit(domTarget(), .{}));
@@ -780,7 +785,7 @@ test "PHP document extension rejects inline code, side effects and unrepresentab
     for (cases) |source| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
-        try std.testing.expectError(error.Pjsx, prepareServer(arena.allocator(), source, "rejected.ptsx", null));
+        try std.testing.expectError(error.Pjsx, prepareServer(arena.allocator(), source, "rejected.ptsx", .{}));
     }
 }
 
@@ -788,7 +793,7 @@ test "PHP SSR store expressions must have a supported live wire, not only an ini
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const program = try prepareServer(a, "import { Publr } from 'publr-dom'; export const state = Publr.reactive({ value: 1 }); export function X() { return <div>{state.value + 1}</div>; }", "X.ptsx", null);
+    const program = try prepareServer(a, "import { Publr } from 'publr-dom'; export const state = Publr.reactive({ value: 1 }); export function X() { return <div>{state.value + 1}</div>; }", "X.ptsx", .{});
     try std.testing.expectError(error.Pjsx, program.emit(phpTarget(), .{}));
     try std.testing.expect(std.mem.indexOf(u8, err.message(), "unsupported PHP state wire") != null);
 }

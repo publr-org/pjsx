@@ -366,7 +366,7 @@ pub fn write_json(w: *std.Io.Writer, arena: std.mem.Allocator, value: anytype) !
     }
     if (T == Json) return w.writeAll(value.text);
     if (comptime @typeInfo(T) == .@"struct" and @hasDecl(T, "is_empty")) {
-        return w.writeAll(if (value.is_empty(arena)) "null" else "true");
+        return w.writeAll(if (value.is_empty(arena, .{})) "null" else "true");
     }
     // Straight into the writer: never a copy of the value's JSON in the arena first.
     try std.json.Stringify.value(value, .{}, w);

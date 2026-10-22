@@ -19,7 +19,7 @@ const expectMatch = regex.expectMatch;
 fn compile(a: std.mem.Allocator, sources: []const [2][]const u8, which: []const u8) ![]const u8 {
     var irs: std.ArrayList(*const pjsx.compiler.ModuleIR) = .empty;
     for (sources) |pair| {
-        try irs.append(a, try pjsx.compiler.createPjsxModule(a, pair[1], pair[0]));
+        try irs.append(a, try pjsx.compiler.createPjsxModule(a, pair[1], pair[0], .{}));
     }
     var program = try pjsx.targets.zig.Program.init(a, irs.items);
     // As the admin builds them: the server's engine gives live expressions their
@@ -791,7 +791,7 @@ const TestRequest = struct {
 fn lowersWithRequest(a: std.mem.Allocator, sources: []const [2][]const u8, which: []const u8) ![]const u8 {
     var irs: std.ArrayList(*const pjsx.compiler.ModuleIR) = .empty;
     for (sources) |pair| {
-        try irs.append(a, try pjsx.compiler.createPjsxModule(a, pair[1], pair[0]));
+        try irs.append(a, try pjsx.compiler.createPjsxModule(a, pair[1], pair[0], .{}));
     }
     var program = try pjsx.targets.zig.Program.init(a, irs.items);
     program.request = pjsx.targets.zig.requestFields(TestRequest);
@@ -843,7 +843,7 @@ test "compiler gap: Publr.request without a declared request is rejected" {
     const module = try pjsx.compiler.createPjsxModule(a,
         \\import { Publr } from "publr-jsx";
         \\export function Rail() { return <nav>{Publr.request.session.email}</nav>; }
-    , "Rail.ptsx");
+    , "Rail.ptsx", .{});
     const program = try pjsx.targets.zig.Program.init(a, &.{module});
     try std.testing.expectError(error.Pjsx, program.lower(a, "Rail"));
     try expectMatch(pjsx.lastError(), "declares no request", "");
@@ -974,4 +974,51 @@ test "closed gap: a family seeds its state from a closed string set prop" {
         \\}
     );
     try expectMatch(out, "write_seed_string\\(w, @tagName\\(", "");
+}
+
+/// As an installed plugin's views are lowered: no engine, every expression native.
+fn lowersNative(a: std.mem.Allocator, sources: []const [2][]const u8, which: []const u8) ![]const u8 {
+    var irs: std.ArrayList(*const pjsx.compiler.ModuleIR) = .empty;
+    for (sources) |pair| {
+        try irs.append(a, try pjsx.compiler.createPjsxModule(a, pair[1], pair[0], .{}));
+    }
+    var program = try pjsx.targets.zig.Program.init(a, irs.items);
+    return program.listing(a, which) catch |e| {
+        std.debug.print("\npjsx diagnostic: {s}\n", .{pjsx.lastError()});
+        return e;
+    };
+}
+
+test "closed gap: a map as a node prop's value lowers natively, as a block holding the loop" {
+    // The sampler's SDK reference: a ListDetailPage's `list={groups.map(...)}`.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const code = try lowersNative(arena.allocator(), &.{
+        .{ "Wrap.ptsx",
+            \\export function Wrap({ list }: { list?: JSX.Element }) {
+            \\  return <ul>{list}</ul>;
+            \\}
+        },
+        .{ "Page.ptsx",
+            \\import { Wrap } from "./Wrap.ptsx";
+            \\export function Page({ rows }: { rows: Array<{ name: string }> }) {
+            \\  return <Wrap list={rows.map((row) => <li>{row.name}</li>)} />;
+            \\}
+        },
+    }, "Page");
+    try std.testing.expect(std.mem.indexOf(u8, code, "rt.block(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, code, "for (props.rows) |row| {") != null);
+}
+
+test "closed gap: a map may take the item's position, a number" {
+    // The sampler's SDK reference: numbered steps, `see.map((step, index) => ...)`.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const code = try lowersNative(arena.allocator(), &.{.{ "Steps.ptsx",
+        \\export function Steps({ steps }: { steps: string[] }) {
+        \\  return <ol>{steps.map((step, index) => <li>{`${index + 1}. ${step}`}</li>)}</ol>;
+        \\}
+    }}, "Steps");
+    try std.testing.expect(std.mem.indexOf(u8, code, "for (props.steps, 0..) |step, ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, code, ": f64 = @floatFromInt(") != null);
 }

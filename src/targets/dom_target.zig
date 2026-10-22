@@ -19,14 +19,13 @@ pub const DomOutput = struct {
     classes: []const []const u8,
 };
 
-pub fn lowerPjsxToDom(allocator: Allocator, source: []const u8, filename: []const u8, runtime_import: ?[]const u8) err.Error!DomOutput {
-    return lowerPjsxToDomWithResolver(allocator, source, filename, runtime_import, null);
-}
-
-pub fn lowerPjsxToDomWithResolver(allocator: Allocator, source: []const u8, filename: []const u8, runtime_import: ?[]const u8, resolver: ?@import("../types.zig").Resolver) err.Error!DomOutput {
-    const parsed = try analyze.parsePjsxWithResolver(allocator, source, filename, resolver);
-    const result = try dom.transformPjsxToDom(allocator, source, .{
-        .filename = filename,
+pub fn lowerPjsxToDom(allocator: Allocator, source: []const u8, filename: []const u8, options: DomTargetOptions) err.Error!DomOutput {
+    const runtime_import = options.runtime_import;
+    const resolver = options.resolver;
+    const parsed = try analyze.parsePjsx(allocator, source, filename, .{
+        .resolver = resolver,
+    });
+    const result = try dom.transformPjsxToDom(allocator, source, filename, .{
         .runtime_import = runtime_import orelse "publr/dom",
         .resolver = resolver,
     });
@@ -40,8 +39,7 @@ pub fn lowerPjsxToDomWithResolver(allocator: Allocator, source: []const u8, file
 pub const DomTarget = compiler.TargetPlugin(DomTargetOptions, DomOutput);
 
 fn compileDom(allocator: Allocator, module: *const compiler.ModuleIR, _: compiler.CompileContext, options: DomTargetOptions) err.Error!DomOutput {
-    const result = try dom.transformPjsxToDom(allocator, module.source, .{
-        .filename = module.filename,
+    const result = try dom.transformPjsxToDom(allocator, module.source, module.filename, .{
         .runtime_import = options.runtime_import orelse "publr/dom",
         .resolver = options.resolver,
     });
