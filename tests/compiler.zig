@@ -2025,6 +2025,31 @@ test "a stateful module shares only the helpers that leave its state alone" {
     try expectNotContains(shared, "function later(");
 }
 
+test "a constant reading other stores as the module loads stays with the module" {
+    var arena = Arena.init();
+    defer arena.deinit();
+    const drawer_source =
+        \\import { Publr } from "publr-jsx";
+        \\
+        \\const navigation = Publr.stores.navigation as { references: string[] };
+        \\const stack = navigation.references;
+        \\export function onBack() { stack.pop(); }
+        \\export function opened(to: string) { return Publr.stores.drawer.open === to; }
+        \\
+        \\export function Drawer() {
+        \\  return <div>drawer</div>;
+        \\}
+    ;
+    const module = createPjsxModule(arena.a(), drawer_source, "Drawer.ptsx", .{}) catch |e| return report(e);
+    const shared = module.component.shared_code.?;
+
+    // Read when called, it is shared; read on load, before the store exists, it is not.
+    try expectContains(shared, "function opened(");
+    try expectNotContains(shared, "const navigation");
+    try expectNotContains(shared, "const stack");
+    try expectNotContains(shared, "function onBack(");
+}
+
 test "a module-level `let` without a value stays in the store its actions run in" {
     var arena = Arena.init();
     defer arena.deinit();

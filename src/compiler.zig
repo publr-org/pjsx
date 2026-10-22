@@ -211,8 +211,9 @@ pub const NodeIR = union(enum) {
 pub const DeclarationIR = struct {
     name: []const u8,
     code: []const u8,
-    /// It reads the module's state or refs, itself or through another helper: it runs only
-    /// inside the module's own store, so no island may import it.
+    /// It reads the module's state or refs, or other stores as the module loads, itself or
+    /// through another helper: it runs only inside the module's own store, so no island may
+    /// import it.
     store_bound: bool = false,
 };
 
@@ -1103,7 +1104,9 @@ fn moduleDeclarations(allocator: Allocator, parsed: *const analyze.ParsedModule,
     return found.items;
 }
 
-/// Marks each helper that reads the module's state or refs, or another helper that does.
+/// Marks each helper that reads the module's state or refs, or another helper that does. A
+/// constant that reads `Publr.stores` as the module loads (`const navigation =
+/// Publr.stores.navigation`) is bound too: shared, it would run before those stores exist.
 fn markStoreBound(allocator: Allocator, parsed: *const analyze.ParsedModule, found: []DeclarationIR, nodes: []const *Node) Error!void {
     std.debug.assert(found.len == nodes.len);
     var bound: std.ArrayList([]const u8) = .empty;
@@ -1114,6 +1117,20 @@ fn markStoreBound(allocator: Allocator, parsed: *const analyze.ParsedModule, fou
     if (parsed.family) |family| {
         try bound.append(allocator, family.state_name);
         for (family.refs) |ref| try bound.append(allocator, ref.name);
+    }
+    const Stores = struct {
+        fn read(_: void, candidate: *Node) bool {
+            return candidate.type == .MemberExpression and !candidate.computed and
+                candidate.object.?.isIdentifier("Publr") and candidate.property.?.isIdentifier("stores");
+        }
+    };
+    for (found, nodes) |*declaration, node| {
+        if (node.type != .VariableDeclaration) continue;
+        const init = node.declarations[0].init orelse continue;
+        if (init.type == .ArrowFunctionExpression or init.type == .FunctionExpression) continue;
+        if (!ast.contains(init, {}, Stores.read)) continue;
+        declaration.store_bound = true;
+        try bound.append(allocator, declaration.name);
     }
     if (bound.items.len == 0) return;
     const Reads = struct {
