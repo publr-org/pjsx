@@ -238,6 +238,9 @@ pub fn prop_array(comptime Target: type, arena: std.mem.Allocator, source: anyty
 
 fn prop_value(comptime Target: type, arena: std.mem.Allocator, source: anytype) error{OutOfMemory}!Target {
     if (Target == @TypeOf(source)) return source;
+    // A string the item may leave out, into one it always has: empty, as the browser
+    // writes null.
+    if (Target == []const u8 and @TypeOf(source) == ?[]const u8) return source orelse "";
     switch (@typeInfo(Target)) {
         .@"struct" => |info| {
             var result: Target = undefined;
@@ -316,6 +319,15 @@ test "array props cross module types with nested values and empty slices intact"
     try std.testing.expectEqual(@as(usize, 0), empty.len);
     const same = try prop_array([]const Source, arena, source);
     try std.testing.expectEqual(source.ptr, same.ptr);
+    // An optional string into a required one: empty when it is left out.
+    const Required = struct {
+        name: []const u8,
+        options: []const TargetOption,
+        help: []const u8,
+    };
+    const required = try prop_array([]const Required, arena, source);
+    try std.testing.expectEqualStrings("Help", required[0].help);
+    try std.testing.expectEqualStrings("", required[1].help);
 }
 
 test "array prop conversion reports allocation failures at every nesting level" {
