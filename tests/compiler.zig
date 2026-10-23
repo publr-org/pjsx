@@ -331,6 +331,32 @@ test "a family root compiles to a store island with seeds and a generated regist
     try expectMatch(registration.code, "\"toggle\": \\(_dataset, context\\) => context\\?\\.event && toggle\\(context\\.event\\)", "");
 }
 
+test "a constant the state's initial value reads is declared before the state in the registration" {
+    var arena = Arena.init();
+    defer arena.deinit();
+    const picker =
+        \\import { Publr } from "publr-jsx";
+        \\
+        \\const anyone = "signed_in";
+        \\
+        \\export const state = Publr.reactive({ who: anyone, open: false });
+        \\
+        \\export const toggle = () => {
+        \\  state.open = !state.open;
+        \\};
+        \\
+        \\export function Picker() {
+        \\  return <button type="button" onClick={toggle}>{state.who}</button>;
+        \\}
+        \\
+    ;
+    const registration = (lowerPjsxStoreRegistration(arena.a(), picker, "Picker.ptsx") catch |e| return report(e)).?;
+    const constant = std.mem.indexOf(u8, registration.code, "const anyone") orelse return error.TestUnexpectedResult;
+    const state = std.mem.indexOf(u8, registration.code, "const state") orelse return error.TestUnexpectedResult;
+
+    try std.testing.expect(constant < state);
+}
+
 test "a family part lowers imported state and actions onto the wire transport" {
     var arena = Arena.init();
     defer arena.deinit();
