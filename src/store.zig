@@ -468,9 +468,17 @@ pub fn lowerParsedStoreRegistration(allocator: Allocator, parsed_ptr: *const ana
         const end = seed.value.end - state_start;
         state = try util.concat(a, &.{ state[0..start], if (fallback == .undefined) "undefined" else try fallback.toJson(a), state[end..] });
     }
+    // The module's locals keep their place around the state: a constant the state's
+    // initial value reads is declared before it, as in the source.
     var local_parts: StringList = .empty;
-    for (reactive.local_statements) |statement| try local_parts.append(a, src[statement.start..statement.end]);
-    const locals = try util.join(a, local_parts.items, "\n");
+    var before_parts: StringList = .empty;
+    for (reactive.local_statements) |statement| {
+        const into = if (statement.end <= state_start) &before_parts else &local_parts;
+        try into.append(a, src[statement.start..statement.end]);
+    }
+    const before = try util.join(a, before_parts.items, "\n");
+    const after = try util.join(a, local_parts.items, "\n");
+    const locals = try util.join(a, &.{ before, after }, "\n");
     var action_parts: StringList = .empty;
     for (reactive.actions) |name| {
         try action_parts.append(a, if (util.containsString(reactive.argument_actions, name))
@@ -509,8 +517,9 @@ pub fn lowerParsedStoreRegistration(allocator: Allocator, parsed_ptr: *const ana
         try code.appendSlice(a, try fmt(a, "Publr.createLocalStore({s}, () => {{\n", .{try jsonString(a, reactive.wire_name)}));
     }
     if (prop_fallbacks.items.len > 0) try code.appendSlice(a, try fmt(a, "  {s}\n", .{try util.join(a, prop_fallbacks.items, "\n  ")}));
+    if (before.len > 0) try code.appendSlice(a, try fmt(a, "  {s}\n", .{try util.replaceAll(a, before, "\n", "\n  ")}));
     try code.appendSlice(a, try fmt(a, "  {s}\n", .{state}));
-    if (locals.len > 0) try code.appendSlice(a, try fmt(a, "  {s}\n", .{try util.replaceAll(a, locals, "\n", "\n  ")}));
+    if (after.len > 0) try code.appendSlice(a, try fmt(a, "  {s}\n", .{try util.replaceAll(a, after, "\n", "\n  ")}));
     try code.appendSlice(a, "  return {\n");
     try code.appendSlice(a, "    state,\n");
     try code.appendSlice(a, try fmt(a, "    actions: {{\n      {s}\n    }},\n", .{actions}));
