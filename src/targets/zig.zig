@@ -56,6 +56,8 @@ const Type = union(enum) {
     /// A slice of structs with these fields; a loop local over it is `item`.
     array: []const Field,
     item: []const Field,
+    /// An object prop that may be null (`value: Place | null`).
+    opt_item: []const Field,
     /// A slice of strings.
     strings,
     opt_strings,
@@ -108,7 +110,7 @@ const Type = union(enum) {
 
     fn is_optional(t: Type) bool {
         return switch (t) {
-            .opt_string, .opt_boolean, .opt_number, .opt_node, .opt_enumeration, .opt_strings => true,
+            .opt_string, .opt_boolean, .opt_number, .opt_node, .opt_enumeration, .opt_strings, .opt_item => true,
             else => false,
         };
     }
@@ -123,7 +125,28 @@ const Type = union(enum) {
                 .enumeration = e,
             },
             .opt_strings => .strings,
+            .opt_item => |fields| .{
+                .item = fields,
+            },
             else => t,
+        };
+    }
+
+    /// The type a read through `?.` has: this one, or null.
+    fn optional(t: Type) ?Type {
+        return switch (t) {
+            .string, .opt_string => .opt_string,
+            .boolean, .opt_boolean => .opt_boolean,
+            .number, .opt_number => .opt_number,
+            .node, .opt_node => .opt_node,
+            .strings, .opt_strings => .opt_strings,
+            .enumeration, .opt_enumeration => |e| .{
+                .opt_enumeration = e,
+            },
+            .item, .opt_item => |fields| .{
+                .opt_item = fields,
+            },
+            else => null,
         };
     }
 };
@@ -786,7 +809,7 @@ fn adapt_props(
         if (spec.default_expression != null and spec.default == null and !empty_array_default) {
             return err.fail("{s}.{s}: this default expression cannot yet be lowered to Zig", .{ where, name });
         }
-        if (spec.nullable and spec.type != .node) {
+        if (spec.nullable and spec.type != .node and spec.type != .object) {
             return err.fail("{s}.{s}: this nullable prop cannot yet be represented faithfully by the Zig target", .{ where, name });
         }
         var prop_type: Type = undefined;
@@ -962,10 +985,18 @@ fn adapt_props(
                 try write_fields(types, object_fields);
                 try types.writeAll("};\n");
 
-                prop_type = .{
-                    .item = object_fields,
-                };
-                zig_type = struct_name;
+                if (spec.nullable) {
+                    prop_type = .{
+                        .opt_item = object_fields,
+                    };
+                    zig_type = try std.fmt.allocPrint(arena, "?{s}", .{struct_name});
+                    if (spec.optional) default_code = "null";
+                } else {
+                    prop_type = .{
+                        .item = object_fields,
+                    };
+                    zig_type = struct_name;
+                }
             },
             else => return err.fail("{s}.{s}: prop type \"{s}\" is not lowered", .{ where, name, spec.type.name() }),
         }
@@ -1023,7 +1054,7 @@ fn type_code(t: Type) []const u8 {
         .opt_strings => "?[]const []const u8",
         .action => "?[]const u8",
         .value => "rt.Value",
-        .array, .item, .enumeration, .opt_enumeration, .null, .action_name, .finite_map, .finite, .state_root, .ref_name, .union_value, .union_typeof => unreachable,
+        .array, .item, .opt_item, .enumeration, .opt_enumeration, .null, .action_name, .finite_map, .finite, .state_root, .ref_name, .union_value, .union_typeof => unreachable,
     };
 }
 
@@ -2493,6 +2524,36 @@ const Generator = struct {
 
     /// The raw text of a `zig_string` literal this generator produced (action
     /// names are identifiers, so nothing in them was escaped).
+    /// An action handed to another component as `store::action`: the callee may draw it
+    /// inside a store of its own with an action of that name (a menu's `toggle`), which a
+    /// bare name would reach first.
+    fn qualified_action(gen: *Generator, literal: []const u8) Error![]const u8 {
+        const name = try gen.unquoted(literal);
+        // Only a store that marks the module's root is found by name; one a view places
+        // by hand keeps the bare name.
+        if (gen.module.wire) |wire| if (wire.kind == .family or gen.module.root.* == .element and
+            gen.module.root.element.name == .intrinsic)
+        {
+            for (wire.actions) |action| {
+                if (std.mem.eql(u8, action, name)) {
+                    return zig_string(gen.arena, try std.fmt.allocPrint(gen.arena, "{s}::{s}", .{ wire.store, name }));
+                }
+            }
+        };
+        for (gen.foreigns) |foreign| {
+            for (foreign.actions) |action| {
+                if (!std.mem.eql(u8, action.name, name)) continue;
+                for (gen.modules) |candidate| {
+                    if (!std.mem.eql(u8, candidate.file_stem, foreign.module_name) and
+                        !std.mem.eql(u8, candidate.name, foreign.module_name)) continue;
+                    const wire = candidate.wire orelse break;
+                    return zig_string(gen.arena, try std.fmt.allocPrint(gen.arena, "{s}::{s}", .{ wire.store, name }));
+                }
+            }
+        }
+        return literal;
+    }
+
     fn unquoted(gen: *Generator, literal: []const u8) Error![]const u8 {
         if (literal.len < 2 or literal[0] != '"') {
             return gen.fail("an action name is not a literal", .{});
@@ -3823,6 +3884,21 @@ const Generator = struct {
             try out.writer.writeAll(" }");
             return out.toOwnedSlice();
         }
+        // Into an object that may be null: the object, else null.
+        if (target == .opt_item and lowered.type == .item) {
+            return gen.coerce(lowered, target.unwrapped());
+        }
+        if (target == .opt_item and lowered.type == .opt_item) {
+            const binding = try gen.fresh("present");
+            return std.fmt.allocPrint(gen.arena, "(if ({s}) |{s}| {s} else null)", .{
+                lowered.code,
+                binding,
+                try gen.coerce(.{
+                    .code = binding,
+                    .type = lowered.type.unwrapped(),
+                }, target.unwrapped()),
+            });
+        }
 
         const same = std.meta.activeTag(lowered.type) == std.meta.activeTag(target);
         const widened = !lowered.type.is_optional() and
@@ -3838,7 +3914,7 @@ const Generator = struct {
         }
 
         if (target == .action and lowered.type == .action_name) {
-            return lowered.code;
+            return gen.qualified_action(lowered.code);
         }
 
         if (lowered.type == .finite) {
@@ -3995,6 +4071,11 @@ const Generator = struct {
                     const present_count = gen.present_values.items.len;
                     defer gen.present_values.shrinkRetainingCapacity(present_count);
                     if (left.type.is_optional() and left.type != .opt_boolean) try gen.present_values.append(gen.arena, left.code);
+                    // `x !== null && …`: x is there inside, as TypeScript narrows it.
+                    if (present_test(operation_ir.left)) |tested| {
+                        const present = try gen.expression(tested);
+                        if (present.type.is_optional()) try gen.present_values.append(gen.arena, present.code);
+                    }
                     try gen.child_expression(operation_ir.right);
                     try gen.flush();
                     gen.indent -= 1;
@@ -5609,6 +5690,27 @@ const Generator = struct {
                 }
                 if (call.callee.* == .reference) {
                     const callee_name = call.callee.reference.name;
+                    // `String(x)`: the value as JavaScript writes it.
+                    const shadowed = for (gen.locals.items) |local| {
+                        if (std.mem.eql(u8, local.source_name orelse local.name, callee_name)) break true;
+                    } else false;
+                    if (!shadowed and call.callee.reference.source == .local and std.mem.eql(u8, callee_name, "String") and
+                        call.arguments.len == 1)
+                    {
+                        const arg = try gen.expression(call.arguments[0]);
+                        gen.arena_used = true;
+                        return .{
+                            .code = switch (arg.type) {
+                                .string => arg.code,
+                                .number => try std.fmt.allocPrint(gen.arena, "(try rt.number_to_string(arena, {s}))", .{arg.code}),
+                                .boolean => try std.fmt.allocPrint(gen.arena, "(if ({s}) \"true\" else \"false\")", .{arg.code}),
+                                .enumeration => try std.fmt.allocPrint(gen.arena, "@tagName({s})", .{arg.code}),
+                                .value => try gen.value_into(arg.code, .string),
+                                else => return gen.fail("String() of a {s} is not lowered", .{@tagName(arg.type)}),
+                            },
+                            .type = .string,
+                        };
+                    }
                     if (gen.is_publr_jsx_import(callee_name)) {
                         if (std.mem.eql(u8, callee_name, "initials") and call.arguments.len == 1) {
                             const arg = try gen.expression(call.arguments[0]);
@@ -5666,6 +5768,26 @@ const Generator = struct {
                 const object = try gen.expression(member.object);
                 // `a?.b` on a value the types say is there reads it; on one that may be
                 // missing it is the engine's.
+                if (member.optional and object.type == .opt_item and member.property == .string) {
+                    const name = member.property.string;
+                    const field = find_field(object.type.opt_item, name) orelse {
+                        return gen.fail("no field \"{s}\" on the object", .{name});
+                    };
+                    const read = field.type.optional() orelse {
+                        return gen.fail("`?.{s}` reads a {s}, which has no optional form", .{ name, @tagName(field.type) });
+                    };
+                    const binding = try gen.fresh("present");
+                    return .{
+                        .code = try std.fmt.allocPrint(gen.arena, "(if ({s}) |{s}| @as({s}, {s}.{f}) else null)", .{
+                            object.code,
+                            binding,
+                            if (field.zig_type[0] == '?') field.zig_type else try std.fmt.allocPrint(gen.arena, "?{s}", .{field.zig_type}),
+                            binding,
+                            std.zig.fmtId(name),
+                        }),
+                        .type = read,
+                    };
+                }
                 if (member.optional and object.type.is_optional()) {
                     return gen.fail("`?.` on an optional {s} is not lowered", .{@tagName(object.type)});
                 }
@@ -5756,8 +5878,15 @@ const Generator = struct {
                             .type = field_of_item.type,
                         };
                     },
-                    else => return gen.fail("member \"{s}\" of a {s}", .{ property_name, @tagName(object.type) }),
+                    // A field of the module's own state read where nothing wires it (an
+                    // attribute in a list the render draws itself): its first value.
+                    .state_root => if (try gen.own_initial(e)) |initial| switch (initial) {
+                        .lowered => |lowered| return lowered,
+                        .unservable => {},
+                    },
+                    else => {},
                 }
+                return gen.fail("member \"{s}\" of a {s}", .{ property_name, @tagName(object.type) });
             },
             .unary => |unary| {
                 const argument = try gen.expression(unary.argument);
@@ -6356,7 +6485,7 @@ const Generator = struct {
             },
             .opt_number => try std.fmt.allocPrint(gen.arena, "(if ({s}) |value| value != 0 and !std.math.isNan(value) else false)", .{lowered.code}),
             .opt_enumeration => try std.fmt.allocPrint(gen.arena, "(if ({s}) |value| @tagName(value).len != 0 else false)", .{lowered.code}),
-            .opt_strings, .action => try std.fmt.allocPrint(gen.arena, "({s} != null)", .{lowered.code}),
+            .opt_strings, .opt_item, .action => try std.fmt.allocPrint(gen.arena, "({s} != null)", .{lowered.code}),
             .number => try std.fmt.allocPrint(gen.arena, "({s} != 0 and !std.math.isNan({s}))", .{ lowered.code, lowered.code }),
             .string => try std.fmt.allocPrint(gen.arena, "({s}.len != 0)", .{lowered.code}),
             .node => blk: {
@@ -6678,6 +6807,21 @@ fn contains_jsx(e: *const ExpressionIR) bool {
 
 fn is_null_literal(e: *const ExpressionIR) bool {
     return e.* == .literal and e.literal == .null;
+}
+
+/// The value `x !== null` (or `!=`, or against `undefined`) tests is there, else null.
+fn present_test(e: *const ExpressionIR) ?*const ExpressionIR {
+    if (e.* != .operation) return null;
+    const operation = e.operation;
+    if (!std.mem.eql(u8, operation.operator, "!==") and !std.mem.eql(u8, operation.operator, "!=")) return null;
+    const absent = struct {
+        fn is(side: *const ExpressionIR) bool {
+            return is_null_literal(side) or side.* == .absent;
+        }
+    };
+    if (absent.is(operation.right)) return operation.left;
+    if (absent.is(operation.left)) return operation.right;
+    return null;
 }
 
 // ---- tests ------------------------------------------------------------------------
