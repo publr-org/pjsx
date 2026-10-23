@@ -664,8 +664,13 @@ fn propSpec(c: *Context, t: *Type, optional: bool) Error!analyze.PropSchema {
         .function => .action,
         .style => .style,
         .array, .tuple => .array,
+        .object => .object,
         else => return err.fail("pjsx: prop type {s} cannot be lowered; use an accurate TypeScript type", .{@tagName(core.kind)}),
     };
+    if (s.type == .object) {
+        s.fields = try objectSchema(c, try c.object(core));
+        return s;
+    }
     if (core.literal != null and s.values == null and core.kind == .string) s.values = try c.a.dupe(analyze.Primitive, &.{core.literal.?});
     if (s.type == .array) {
         const item = if (core.item) |i| i else blk: {

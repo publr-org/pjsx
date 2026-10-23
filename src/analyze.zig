@@ -28,6 +28,8 @@ pub const PropType = enum {
     style,
     number,
     array,
+    /// An object of named fields (`fields`), lowered to a struct.
+    object,
     @"union",
     optional_number,
     optional_string,
@@ -1115,13 +1117,12 @@ fn reactiveBinding(allocator: Allocator, fn_node: *Node, root: *Node, component_
         } else if (statement.type == .FunctionDeclaration and statement.id != null) {
             try declared_functions.put(statement.id.?.name, {});
             try local_statements.append(allocator, statement);
-        } else if (statement.type == .ExpressionStatement and statement.expression.?.type == .CallExpression and
-            statement.expression.?.callee.?.isIdentifier("effect"))
-        {
+        } else if (statement.type == .ExpressionStatement and isPublrCall(statement.expression, "effect")) {
             try validateEffect(statement.expression.?, state_name.?);
             try local_statements.append(allocator, statement);
         }
     }
+    try keepReadConstants(allocator, body.statements, state_statement.?, &local_statements);
 
     for (referenced.keys()) |action| {
         if (!declared_functions.has(action)) {
@@ -1149,6 +1150,43 @@ fn reactiveBinding(allocator: Allocator, fn_node: *Node, root: *Node, component_
         .refs = try sortedRefs(allocator, &refs),
         .constants = try configuredConstants(allocator, fn_node),
     };
+}
+
+/// The component's other constants the kept statements read, themselves or through one
+/// another: a handler or an effect runs in the browser with what it reads. In body order.
+fn keepReadConstants(allocator: Allocator, statements: []*Node, state_statement: *Node, kept: *std.ArrayList(*Node)) Error!void {
+    const Reads = struct {
+        fn any(names: []const []const u8, candidate: *Node) bool {
+            for (names) |name| if (candidate.isIdentifier(name)) return true;
+            return false;
+        }
+    };
+    var changed = true;
+    while (changed) {
+        changed = false;
+        for (statements) |statement| {
+            if (statement == state_statement or statement.type != .VariableDeclaration) continue;
+            if (std.mem.indexOfScalar(*Node, kept.items, statement) != null) continue;
+            var names: std.ArrayList([]const u8) = .empty;
+            for (statement.declarations) |declaration| {
+                const id = declaration.id orelse continue;
+                if (id.type == .Identifier) try names.append(allocator, id.name);
+            }
+            if (names.items.len == 0) continue;
+            const read = for (kept.items) |statement_kept| {
+                if (ast.contains(statement_kept, @as([]const []const u8, names.items), Reads.any)) break true;
+            } else false;
+            if (!read) continue;
+            try kept.append(allocator, statement);
+            changed = true;
+        }
+    }
+    const Order = struct {
+        fn before(_: void, left: *Node, right: *Node) bool {
+            return left.start < right.start;
+        }
+    };
+    std.mem.sort(*Node, kept.items, {}, Order.before);
 }
 
 /// `name(...)` or `Publr.name(...)`
