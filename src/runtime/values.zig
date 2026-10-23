@@ -365,6 +365,13 @@ pub fn write_json(w: *std.Io.Writer, arena: std.mem.Allocator, value: anytype) !
         return w.writeAll("null");
     }
     if (T == Json) return w.writeAll(value.text);
+    if (T == Value) return switch (value) {
+        .undefined, .null => w.writeAll("null"),
+        .boolean => |flag| w.writeAll(if (flag) "true" else "false"),
+        .number => |number| std.json.Stringify.value(number, .{}, w),
+        .string => |text| std.json.Stringify.value(text, .{}, w),
+        .json => |text| w.writeAll(text),
+    };
     if (comptime @typeInfo(T) == .@"struct" and @hasDecl(T, "is_empty")) {
         return w.writeAll(if (value.is_empty(arena, .{})) "null" else "true");
     }
@@ -386,6 +393,22 @@ test "an object leaves an absent optional out" {
         .open = true,
     });
     try std.testing.expectEqualStrings("{\"size\":\"sm\",\"open\":true}", text);
+}
+
+test "an engine's value is a state field as JSON" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const text = try object(a, .{
+        .id = Value{
+            .string = "a\"b",
+        },
+        .rows = Value{
+            .json = "[1]",
+        },
+        .gone = @as(Value, .undefined),
+    });
+    try std.testing.expectEqualStrings("{\"id\":\"a\\\"b\",\"rows\":[1],\"gone\":null}", text);
 }
 
 test "an answer reads back as the value it was" {
