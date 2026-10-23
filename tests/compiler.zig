@@ -2035,6 +2035,8 @@ test "a constant reading other stores as the module loads stays with the module"
         \\const stack = navigation.references;
         \\export function onBack() { stack.pop(); }
         \\export function opened(to: string) { return Publr.stores.drawer.open === to; }
+        \\export function shown() { return Publr.stores.navigation.open; }
+        \\export function marks() { return { navigation: true }; }
         \\
         \\export function Drawer() {
         \\  return <div>drawer</div>;
@@ -2045,6 +2047,9 @@ test "a constant reading other stores as the module loads stays with the module"
 
     // Read when called, it is shared; read on load, before the store exists, it is not.
     try expectContains(shared, "function opened(");
+    // A property named like the bound constant is not a read of it.
+    try expectContains(shared, "function shown(");
+    try expectContains(shared, "function marks(");
     try expectNotContains(shared, "const navigation");
     try expectNotContains(shared, "const stack");
     try expectNotContains(shared, "function onBack(");

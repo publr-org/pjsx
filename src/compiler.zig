@@ -1133,22 +1133,37 @@ fn markStoreBound(allocator: Allocator, parsed: *const analyze.ParsedModule, fou
         try bound.append(allocator, declaration.name);
     }
     if (bound.items.len == 0) return;
-    const Reads = struct {
-        fn any(names: []const []const u8, candidate: *Node) bool {
-            for (names) |name| if (candidate.isIdentifier(name)) return true;
-            return false;
-        }
-    };
     var changed = true;
     while (changed) {
         changed = false;
         for (found, nodes) |*declaration, node| {
-            if (declaration.store_bound or !ast.contains(node, @as([]const []const u8, bound.items), Reads.any)) continue;
+            if (declaration.store_bound or !readsAny(node, bound.items)) continue;
             declaration.store_bound = true;
             try bound.append(allocator, declaration.name);
             changed = true;
         }
     }
+}
+
+/// Whether `node` reads one of `names`: a name, not a property named so (`Publr.stores.navigation`,
+/// `{ navigation: 1 }`).
+fn readsAny(node: *Node, names: []const []const u8) bool {
+    if (node.type == .MemberExpression and !node.computed) return readsAny(node.object.?, names);
+    if ((node.type == .Property or node.type == .PropertyDefinition or node.type == .MethodDefinition) and !node.computed) {
+        const value = ast.getSingle(node, .value_node) orelse return false;
+        return readsAny(value, names);
+    }
+    for (names) |name| if (node.isIdentifier(name)) return true;
+    for (ast.childFields(node.type)) |field| {
+        if (field[1]) {
+            for (ast.getList(node, field[0])) |child| {
+                if (child) |one| if (readsAny(one, names)) return true;
+            }
+        } else if (ast.getSingle(node, field[0])) |child| {
+            if (readsAny(child, names)) return true;
+        }
+    }
+    return false;
 }
 
 fn refNames(allocator: Allocator, refs: []const analyze.RefBinding) Allocator.Error![]const []const u8 {

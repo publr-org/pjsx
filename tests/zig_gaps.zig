@@ -994,12 +994,14 @@ test "closed gap: a map as a node prop's value lowers natively, as a block holdi
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const code = try lowersNative(arena.allocator(), &.{
-        .{ "Wrap.ptsx",
+        .{
+            "Wrap.ptsx",
             \\export function Wrap({ list }: { list?: JSX.Element }) {
             \\  return <ul>{list}</ul>;
             \\}
         },
-        .{ "Page.ptsx",
+        .{
+            "Page.ptsx",
             \\import { Wrap } from "./Wrap.ptsx";
             \\export function Page({ rows }: { rows: Array<{ name: string }> }) {
             \\  return <Wrap list={rows.map((row) => <li>{row.name}</li>)} />;
@@ -1014,11 +1016,130 @@ test "closed gap: a map may take the item's position, a number" {
     // The sampler's SDK reference: numbered steps, `see.map((step, index) => ...)`.
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const code = try lowersNative(arena.allocator(), &.{.{ "Steps.ptsx",
+    const code = try lowersNative(arena.allocator(), &.{.{
+        "Steps.ptsx",
         \\export function Steps({ steps }: { steps: string[] }) {
         \\  return <ol>{steps.map((step, index) => <li>{`${index + 1}. ${step}`}</li>)}</ol>;
         \\}
     }}, "Steps");
     try std.testing.expect(std.mem.indexOf(u8, code, "for (props.steps, 0..) |step, ") != null);
     try std.testing.expect(std.mem.indexOf(u8, code, ": f64 = @floatFromInt(") != null);
+}
+
+test "closed gap: a state field read in a list the render draws itself takes its first value" {
+    // The roles plugin's RolesNewForm, built as an installed plugin's view (no engine):
+    // `selected={state.copy === role.name}` in a map over a prop.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const code = try lowersNative(arena.allocator(), &.{.{
+        "Form.ptsx",
+        \\import { Publr } from "publr-jsx";
+        \\export type FormProps = { copy: string; roles: Array<{ name: string; label: string }> };
+        \\export const state = Publr.reactive({ copy: "", busy: false });
+        \\export function Form({ copy, roles }: FormProps) {
+        \\  state.copy = copy;
+        \\  return (
+        \\    <select name="copy">
+        \\      {roles.map((role) => (<option value={role.name} selected={state.copy === role.name}>{role.label}</option>))}
+        \\    </select>
+        \\  );
+        \\}
+    }}, "Form");
+    try expectContains(code, "if (std.mem.eql(u8, props.copy, role.name)) try w.writeAll(\" selected\");");
+}
+
+test "closed gap: an action handed to a component names its store" {
+    // A menu item's handler inside a dropdown with an action of the same name: the bare
+    // name reached the dropdown's own `toggle` first.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const sources = [_][2][]const u8{
+        .{
+            "Menu.ptsx",
+            \\import { Publr } from "publr-jsx";
+            \\export const state = Publr.reactive({ open: false });
+            \\export const toggle = () => { state.open = !state.open; };
+            \\export function Menu({ children }: { children?: JSX.Element }) {
+            \\  return <div onClick={toggle}>{children}</div>;
+            \\}
+        },
+        .{
+            "Item.ptsx",
+            \\export type ItemProps = { onClick?: (event: MouseEvent) => void; children?: JSX.Element };
+            \\export function Item({ onClick, children }: ItemProps) {
+            \\  return <button onClick={onClick}>{children}</button>;
+            \\}
+        },
+        .{
+            "Page.ptsx",
+            \\import { Publr } from "publr-jsx";
+            \\import { Menu } from "./Menu.ptsx";
+            \\import { Item } from "./Item.ptsx";
+            \\export const state = Publr.reactive({ on: false });
+            \\export const toggle = () => { state.on = !state.on; };
+            \\export function Page() {
+            \\  return <section onClick={toggle}><Menu><Item onClick={toggle}>Flip</Item></Menu></section>;
+            \\}
+        },
+    };
+    const page = try compile(arena.allocator(), &sources, "Page");
+    try expectContains(page, ".onClick = \"page::toggle\"");
+    // Its own element keeps the bare name: its store is the nearest.
+    try expectContains(page, "data-p-on=\\\"click:toggle\\\"");
+    const menu = try compile(arena.allocator(), &sources, "Menu");
+    try expectContains(menu, "data-p-on=\\\"click:toggle\\\"");
+}
+
+test "closed gap: an object prop that may be null" {
+    // A field kind's editor: `value: Place | null`, null for a new record.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const sources = [_][2][]const u8{
+        .{
+            "Shown.ptsx",
+            \\export type ShownProps = { place: { name: string; lat: number } | null };
+            \\export function Shown({ place }: ShownProps) {
+            \\  return <i>{place?.name ?? "Nowhere"}</i>;
+            \\}
+        },
+        .{
+            "Fields.ptsx",
+            \\import { Shown } from "./Shown.ptsx";
+            \\type Place = { name: string; lat: number };
+            \\export type FieldsProps = { ctx: { value: Place | null } };
+            \\export function Fields({ ctx }: FieldsProps) {
+            \\  return (
+            \\    <div>
+            \\      <input value={ctx.value?.name ?? ""} />
+            \\      <input value={`${ctx.value?.lat ?? 0}`} />
+            \\      {ctx.value !== null && <p>{ctx.value.name}</p>}
+            \\      <Shown place={ctx.value} />
+            \\    </div>
+            \\  );
+            \\}
+        },
+    };
+    const code = try lowersNative(arena.allocator(), &sources, "Fields");
+    try expectContains(code, "value: ?Value,");
+    try expectContains(code, "(if (props.ctx.value) |present_1| @as(?[]const u8, present_1.name) else null) orelse \"\"");
+    try expectContains(code, "(if (props.ctx.value) |present_2| @as(?f64, present_2.lat) else null)");
+    try expectContains(code, "try rt.escape(w, (props.ctx.value).?.name);");
+    try expectContains(code, ".place = (if (props.ctx.value) |present_");
+    const shown = try lowersNative(arena.allocator(), &sources, "Shown");
+    try expectContains(shown, "place: ?Place,");
+}
+
+test "closed gap: String(x) lowers without the engine" {
+    // An installed plugin's view: `String(row.count)` in a list.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const code = try lowersNative(arena.allocator(), &.{.{
+        "Counts.ptsx",
+        \\export type CountsProps = { rows: Array<{ name: string; count: number; on: boolean }> };
+        \\export function Counts({ rows }: CountsProps) {
+        \\  return <ul>{rows.map((row) => <li title={String(row.on)}>{row.name}: {String(row.count)}</li>)}</ul>;
+        \\}
+    }}, "Counts");
+    try expectContains(code, "(try rt.number_to_string(arena, row.count))");
+    try expectContains(code, "(if (row.on) \"true\" else \"false\")");
 }
