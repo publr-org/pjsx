@@ -484,6 +484,23 @@ pub const Program = struct {
             const target = for (program.modules) |candidate| {
                 if (std.mem.eql(u8, candidate.file_stem, import.module)) break candidate;
             } else continue;
+            // A ref names an element in the browser; on the server there is none, so a slot
+            // that mentions one (a submenu placed beside its trigger) reads null.
+            if (target.wire) |wire| {
+                const is_ref = for (wire.refs) |ref| {
+                    if (std.mem.eql(u8, ref, import.imported)) break true;
+                } else false;
+                const taken = for (found.items) |known| {
+                    if (std.mem.eql(u8, known.name, import.local)) break true;
+                } else false;
+                if (is_ref and !taken) {
+                    try found.append(arena, .{
+                        .name = import.local,
+                        .code = try std.fmt.allocPrint(arena, "const {s} = null;", .{import.local}),
+                    });
+                    continue;
+                }
+            }
             const helper = for (target.declarations) |declaration| {
                 if (std.mem.eql(u8, declaration.name, import.imported) and !declaration.store_bound) break declaration;
             } else continue;
@@ -1219,6 +1236,8 @@ const Generator = struct {
     /// True while the module's root node renders: the root element (or each
     /// arm of a conditional root) receives the show/text transport plumbing.
     at_root: bool,
+    /// While a `position` is lowered: a ref it reads makes its slot the browser's.
+    refs_live: bool = false,
     /// The module's compiled expressions. One expression asked for twice in the
     /// same scope names one slot; a list's prototype and its server rows differ.
     slots: std.ArrayList(slots_file.Slot) = .empty,
@@ -1335,6 +1354,25 @@ const Generator = struct {
         @memcpy(grown[0..pairs.len], pairs);
         grown[pairs.len] = pair;
         return grown;
+    }
+
+    /// Whether `e` reads a ref anywhere.
+    fn reads_ref(gen: *Generator, e: *const ExpressionIR) Error!bool {
+        for (try expression_js.references(gen.arena, e)) |read| {
+            if (read.source != .prop and gen.is_ref_name(read.name)) return true;
+        }
+        return false;
+    }
+
+    /// Whether `name` is a ref, the module's own or one it imports.
+    fn is_ref_name(gen: *const Generator, name: []const u8) bool {
+        if (gen.module.wire) |wire| {
+            for (wire.refs) |ref| if (std.mem.eql(u8, ref, name)) return true;
+        }
+        for (gen.foreigns) |foreign| {
+            for (foreign.refs) |ref| if (std.mem.eql(u8, ref.local, name)) return true;
+        }
+        return false;
     }
 
     /// The family whose state this module imports under `name`.
@@ -2119,6 +2157,25 @@ const Generator = struct {
 
         for (plain.items) |a| {
             const rename: ?[]const u8 = if (std.mem.eql(u8, a.name, "position")) "data-p-position" else if (std.mem.eql(u8, a.name, "focusScope")) "data-p-focus" else null;
+
+            // A position beside a ref (a submenu beside its trigger) is the browser's to work
+            // out: the server writes only the marker, the binding carries the slot.
+            if (std.mem.eql(u8, a.name, "position") and a.form == .expression and try gen.reads_ref(a.value)) {
+                gen.refs_live = true;
+                const runtime = gen.slot_runtime(a.value);
+                gen.refs_live = false;
+
+                if (try runtime) |spec| {
+                    try gen.static(" data-p-position");
+                    try transport_parts.writer.print(
+                        " (if ({s}) |publr_wire| @as(?[]const u8, rt.concat(arena, &.{{ \"data-p-position:\", publr_wire }})) else @as(?[]const u8, null)),",
+                        .{spec},
+                    );
+                    gen.arena_used = true;
+                    continue;
+                }
+            }
+
             try gen.attribute(a, rename);
 
             // An attribute bound to transportable props re-emits the wire a
@@ -4969,6 +5026,14 @@ const Generator = struct {
                         continue;
                     }
                     if (std.mem.eql(u8, name, "Publr") and reads_publr_stores(e)) live = true;
+                    // A ref is an element only the browser has: a position beside one is
+                    // worked out there.
+                    if (gen.refs_live and gen.is_ref_name(name)) {
+                        live = true;
+                        servable = false;
+                        // The browser hands it in from the nearest store that has it.
+                        if (!util.containsString(parameters.items, name)) try parameters.append(gen.arena, name);
+                    }
                 },
             }
         }
@@ -7545,6 +7610,40 @@ test "with an engine, a static expression the render cannot lower is the engine'
     const server = try program.serverFile(arena);
     try std.testing.expect(std.mem.indexOf(u8, server, "const shout = (text) => text.toUpperCase() + \"!\";") != null);
     try std.testing.expect(std.mem.indexOf(u8, server, "({ text }) => shout(text)") != null);
+}
+
+test "a position beside a ref another module exports is bound in the browser" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const root = try compiler.createPjsxModule(arena,
+        \\import { Publr } from "publr-jsx";
+        \\export const state = Publr.reactive({ open: false });
+        \\export const trigger = Publr.ref();
+        \\export function Menu({ children }: { children: JSX.Element }) {
+        \\  return <div data-open={state.open}>{children}</div>;
+        \\}
+    , "Menu.ptsx", .{});
+    const part = try compiler.createPjsxModule(arena,
+        \\import { state, trigger } from "./Menu.ptsx";
+        \\export function MenuContent({ sub }: { sub: boolean }) {
+        \\  return <div position={sub ? { anchor: trigger } : "right"} hidden={!state.open}></div>;
+        \\}
+    , "MenuContent.ptsx", .{});
+    var program = try Program.init(arena, &.{ root, part });
+    program.request = &.{.{
+        .name = "path",
+        .type = .string,
+        .zig_type = "[]const u8",
+        .default = null,
+    }};
+    program.expressions_field = "publr_expressions";
+    const code = try program.lower(arena, "MenuContent");
+
+    // The server writes the marker; the browser's binding works the anchor out.
+    try std.testing.expect(std.mem.indexOf(u8, code, "<div data-p-position") != null);
+    try std.testing.expect(std.mem.indexOf(u8, code, "\"data-p-position:\", publr_wire") != null);
+    try std.testing.expect(std.mem.indexOf(u8, code, "data-p-position=") == null);
 }
 
 test "a slot that calls an intrinsic takes its JavaScript into the browser's stores" {
