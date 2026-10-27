@@ -2162,3 +2162,28 @@ test "a module-level state's initial calling an imported helper has its value on
     // The server's program has the helper, as the browser's does.
     try expectContains(server, "Tested: (state) => {\nconst asked_in = (name) =>");
 }
+
+test "a stores file for some modules registers only theirs, importing the runtime from where it says" {
+    var arena = Arena.init();
+    defer arena.deinit();
+    const a = arena.a();
+    const own_source = try std.mem.replaceOwned(u8, a, family_root_source, "isclosure", "rawer");
+    var irs: std.ArrayList(*const compiler.ModuleIR) = .empty;
+    try irs.append(a, createPjsxModule(a, family_root_source, "Disclosure.ptsx", .{}) catch |e| return report(e));
+    try irs.append(a, createPjsxModule(a, own_source, "Drawer.ptsx", .{}) catch |e| return report(e));
+    var program = pjsx.targets.zig.Program.init(a, irs.items) catch |e| return report(e);
+    _ = program.lower(a, "Disclosure") catch |e| return report(e);
+    _ = program.lower(a, "Drawer") catch |e| return report(e);
+
+    const all = try program.storesFile(a);
+    try expectContains(all, "import { Publr } from \"./publr.js\";");
+    try expectContains(all, "createLocalStore(\"disclosure\"");
+    try expectContains(all, "createLocalStore(\"drawer\"");
+
+    program.stores_of = &.{"Drawer"};
+    program.runtime_path = "../../publr.js";
+    const own = try program.storesFile(a);
+    try expectContains(own, "import { Publr } from \"../../publr.js\";");
+    try expectContains(own, "createLocalStore(\"drawer\"");
+    try std.testing.expect(std.mem.indexOf(u8, own, "createLocalStore(\"disclosure\"") == null);
+}

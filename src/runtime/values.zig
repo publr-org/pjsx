@@ -236,6 +236,58 @@ pub fn of(arena: std.mem.Allocator, value: anytype) Error!Value {
     };
 }
 
+/// A list the engine answered, row by row: empty for anything but an array.
+pub fn rows(arena: std.mem.Allocator, value: Value) Error![]const Value {
+    if (value != .json or value.json[0] != '[') return &.{};
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena, value.json, .{});
+    const out = try arena.alloc(Value, parsed.array.items.len);
+    for (parsed.array.items, out) |item, *row| row.* = try from_json(arena, item);
+    return out;
+}
+
+/// `value.name`, as JavaScript reads it: `undefined` off anything but an object.
+pub fn member(arena: std.mem.Allocator, value: Value, name: []const u8) Error!Value {
+    std.debug.assert(name.len > 0);
+    if (value != .json or value.json[0] != '{') return .undefined;
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena, value.json, .{});
+    return from_json(arena, parsed.object.get(name) orelse return .undefined);
+}
+
+/// The value as `JSON.stringify` writes it: a list row's key.
+pub fn json_text(arena: std.mem.Allocator, value: Value) Error![]const u8 {
+    return switch (value) {
+        .undefined, .null => "null",
+        .boolean => |boolean| if (boolean) "true" else "false",
+        .number => |number| try semantics.number_to_string(arena, number),
+        .string => |text| try std.json.Stringify.valueAlloc(arena, text, .{}),
+        .json => |text| text,
+    };
+}
+
+fn from_json(arena: std.mem.Allocator, value: std.json.Value) Error!Value {
+    return switch (value) {
+        .null => .null,
+        .bool => |boolean| .{
+            .boolean = boolean,
+        },
+        .integer => |integer| .{
+            .number = @floatFromInt(integer),
+        },
+        .float => |float| .{
+            .number = float,
+        },
+        .number_string => |text| .{
+            .number = std.fmt.parseFloat(f64, text) catch std.math.nan(f64),
+        },
+        .string => |text| .{
+            .string = text,
+        },
+        .array, .object => .{
+            .json = try std.json.Stringify.valueAlloc(arena, value, .{}),
+        },
+    };
+}
+
 /// Which of `tags` a value names: its index, or `tags.len` when none (or not a string).
 pub fn tag(arena: std.mem.Allocator, value: Value, tags: []const []const u8) Error!usize {
     _ = arena;
@@ -461,8 +513,21 @@ test "a value writes as an attribute, a text, a class list and a typed prop" {
     const Row = struct {
         id: []const u8,
     };
-    const rows = try into([]const Row, a, .{
+    const read = try into([]const Row, a, .{
         .json = "[{\"id\":\"a\",\"extra\":1}]",
     });
-    try std.testing.expectEqualStrings("a", rows[0].id);
+    try std.testing.expectEqualStrings("a", read[0].id);
+}
+
+test "a list's rows and their fields read as JavaScript reads them" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const list = try rows(a, try parse(a, "[{\"src\":\"/a\",\"n\":2},\"x\"]"));
+    try std.testing.expectEqual(@as(usize, 2), list.len);
+    try std.testing.expectEqualStrings("/a", (try member(a, list[0], "src")).string);
+    try std.testing.expectEqual(@as(f64, 2), (try member(a, list[0], "n")).number);
+    try std.testing.expect((try member(a, list[1], "src")) == .undefined);
+    try std.testing.expectEqualStrings("\"x\"", try json_text(a, list[1]));
+    try std.testing.expectEqual(@as(usize, 0), (try rows(a, .undefined)).len);
 }
