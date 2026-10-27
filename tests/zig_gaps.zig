@@ -1181,3 +1181,50 @@ test "closed gap: String(x) lowers without the engine" {
     try expectContains(code, "(try rt.number_to_string(arena, row.count))");
     try expectContains(code, "(if (row.on) \"true\" else \"false\")");
 }
+
+test "closed gap: a list of another component's state the types do not shape draws its rows" {
+    // A field's help frames: `(editor.panels[field.name] ?? []).map(…)` inside the fields'
+    // own loop, the editor's state a record of lists by field.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const sources = [_][2][]const u8{
+        .{
+            "Shown.ptsx",
+            \\export function Shown({ src }: { src: string }) { return <iframe src={src}></iframe>; }
+        },
+        .{
+            "Editor.ptsx",
+            \\import { Publr } from "publr-jsx";
+            \\import { Fields } from "./Fields.ptsx";
+            \\export const state = Publr.reactive({ panels: {} as Record<string, Array<{ label: string; src: string }>> });
+            \\export function Editor({ fields }: { fields: Array<{ name: string }> }) {
+            \\  return <form><Fields fields={fields} /></form>;
+            \\}
+        },
+        .{
+            "Fields.ptsx",
+            \\import { Shown } from "./Shown.ptsx";
+            \\import { state as editor } from "./Editor.ptsx";
+            \\export function Fields({ fields }: { fields: Array<{ name: string }> }) {
+            \\  return (
+            \\    <ul>
+            \\      {fields.map((field) => (
+            \\        <li>
+            \\          {field.name}
+            \\          {(editor.panels[field.name] ?? []).map((panel) => <Shown key={panel.label} src={panel.src} />)}
+            \\        </li>
+            \\      ))}
+            \\    </ul>
+            \\  );
+            \\}
+        },
+    };
+    const code = try compile(arena.allocator(), &sources, "Fields");
+    // In both arms: the fields bound by a caller, and handed in plain.
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, code, "try rt.value_rows(arena, (try rt.evaluate("));
+    // Drawn by the server from the engine's answer, each row a value read field by field.
+    try expectContains(code, "try rt.value_rows(arena, (try rt.evaluate(");
+    try expectContains(code, "const row_key_");
+    try expectContains(code, "try rt.value_json(arena, (try rt.value_member(arena, panel, \"label\")))");
+    try expectContains(code, ".src = (try rt.value_into([]const u8, arena, (try rt.value_member(arena, panel, \"src\"))))");
+}

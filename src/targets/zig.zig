@@ -87,6 +87,9 @@ const Type = union(enum) {
     ref_name,
     /// A compiled expression's value as the server ran it: `rt.Value`.
     value,
+    /// A list the engine answered whose rows have no declared shape: `[]const rt.Value`,
+    /// a loop local over it is a `value`.
+    values,
 
     const Enumeration = struct {
         name: []const u8,
@@ -1098,6 +1101,7 @@ fn type_code(t: Type) []const u8 {
         .opt_strings => "?[]const []const u8",
         .action => "?[]const u8",
         .value => "rt.Value",
+        .values => "[]const rt.Value",
         .array, .item, .opt_item, .enumeration, .opt_enumeration, .null, .action_name, .finite_map, .finite, .state_root, .ref_name, .union_value, .union_typeof => unreachable,
     };
 }
@@ -1654,6 +1658,27 @@ const Generator = struct {
     /// engine's answer read into the rows of the list it starts from.
     fn list_rows(gen: *Generator, e: *const ExpressionIR) Error!?Lowered {
         if (try gen.foreign_rows(e)) |rows| return rows;
+        if (try gen.typed_rows(e)) |rows| {
+            if (rows.type == .array or rows.type == .strings) return rows;
+        }
+        // A list whose rows have no declared shape (`editor.panels[field.name] ?? []`): the
+        // engine's answer, row by row.
+        if (gen.expressions_field.len == 0 or (try gen.slot_call(e)) == null) return null;
+        const value = switch (try gen.server_value(e)) {
+            .lowered => |lowered| lowered,
+            .unservable => return null,
+        };
+        gen.props_used = true;
+        return .{
+            // A prototype (a part drawn inside a caller's template) has no rows.
+            .code = try std.fmt.allocPrint(gen.arena, "(if (props.publr_prototype) @as([]const rt.Value, &.{{}}) else try rt.value_rows(arena, {s}))", .{value.code}),
+            .type = .values,
+        };
+    }
+
+    /// `list_rows` for a list the module's types describe: a state field's seed or
+    /// initial, or a computation over one.
+    fn typed_rows(gen: *Generator, e: *const ExpressionIR) Error!?Lowered {
         if (try gen.native_initial(e)) |initial| {
             if (initial == .lowered) return initial.lowered;
         }
@@ -4640,14 +4665,15 @@ const Generator = struct {
 
     /// `state.items[key].map(...)`, a live list whose subject also reads props: bound by
     /// its compiled expression called with their values (`$e_Group_3(name: "seo")`). The
-    /// browser draws its rows; the server has no first value for them.
+    /// server draws its first rows where it holds them (`list_rows`); a prototype has none.
     fn slot_list_loop(gen: *Generator, e: *const ExpressionIR, subject: *const ExpressionIR, function: anytype) Error!void {
         const spec = (try gen.slot_runtime(subject)) orelse return gen.fail("a live list's subject has no binding", .{});
         const capture = try gen.fresh("list_wire");
+        const rows = if (gen.template_depth == 0) try gen.list_rows(subject) else null;
 
         try gen.flush();
         try gen.line("const {s} = {s}.?;", .{ capture, spec });
-        try gen.reactive_rows(e, function, capture, null);
+        try gen.reactive_rows(e, function, capture, rows);
     }
 
     /// A template's prototype: written once per page when its code reads nothing of the
@@ -4783,6 +4809,7 @@ const Generator = struct {
                 .item = fields,
             },
             .strings => .string,
+            .values => .value,
             else => return gen.fail("a seeded list needs an array", .{}),
         };
         const parameter_source = function.parameters[0];
@@ -4810,10 +4837,14 @@ const Generator = struct {
             .type = item_type,
         });
         var key_code: []const u8 = index;
+        // A row the engine answered is keyed by its value's JSON.
+        var key_value = false;
         if (function.body.* == .node and function.body.node.node.* == .element) {
             for (function.body.node.node.element.attributes) |attr| {
                 if (attr == .attribute and std.mem.eql(u8, attr.attribute.name, "key")) {
-                    key_code = (try gen.expression(attr.attribute.value)).code;
+                    const lowered = try gen.expression(attr.attribute.value);
+                    key_code = lowered.code;
+                    key_value = lowered.type == .value;
                 }
             }
         }
@@ -4821,7 +4852,11 @@ const Generator = struct {
         const marker = try gen.fresh("row_writer");
         const outer = gen.writer_name;
         gen.arena_used = true;
-        try gen.line("const {s} = try std.json.Stringify.valueAlloc(arena, {s}, .{{}});", .{ key, key_code });
+        if (key_value) {
+            try gen.line("const {s} = try rt.value_json(arena, {s});", .{ key, key_code });
+        } else {
+            try gen.line("const {s} = try std.json.Stringify.valueAlloc(arena, {s}, .{{}});", .{ key, key_code });
+        }
         try gen.line("defer arena.free({s});", .{key});
         try gen.line("var {s} = rt.RootAttributeWriter.init({s}, \"data-p-for-key\", {s});", .{ marker, outer, key });
         gen.writer_name = try std.fmt.allocPrint(gen.arena, "(&{s}.writer)", .{marker});
@@ -5954,6 +5989,15 @@ const Generator = struct {
 
                 const property_name = member.property.string;
 
+                // A field of a row the engine answered.
+                if (object.type == .value) {
+                    gen.arena_used = true;
+                    return .{
+                        .code = try std.fmt.allocPrint(gen.arena, "(try rt.value_member(arena, {s}, {s}))", .{ object.code, try zig_string(gen.arena, property_name) }),
+                        .type = .value,
+                    };
+                }
+
                 if (std.mem.eql(u8, property_name, "length")) {
                     switch (object.type) {
                         .array, .strings, .string => return .{
@@ -6610,7 +6654,7 @@ const Generator = struct {
                 break :blk try std.fmt.allocPrint(gen.arena, "(!{s}.{s})", .{ lowered.code, try gen.emptiness() });
             },
             .enumeration => try std.fmt.allocPrint(gen.arena, "(@tagName({s}).len != 0)", .{lowered.code}),
-            .array, .strings, .item => "true",
+            .array, .strings, .item, .values => "true",
             .null => "false",
             .value => try std.fmt.allocPrint(gen.arena, "rt.value_truthy({s})", .{lowered.code}),
             .action_name, .finite_map, .finite, .state_root, .ref_name, .union_value, .union_typeof => gen.fail("a {s} has no truthiness", .{@tagName(lowered.type)}),

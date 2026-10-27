@@ -43,6 +43,9 @@ pub const family_of = js_values.family_of;
 pub const family_state = js_values.family_state;
 pub const value_tag = js_values.tag;
 pub const value_of = js_values.of;
+pub const value_rows = js_values.rows;
+pub const value_member = js_values.member;
+pub const value_json = js_values.json_text;
 
 /// A compiled expression's value as text.
 pub fn write_value_text(w: *std.Io.Writer, value: Value) !void {
