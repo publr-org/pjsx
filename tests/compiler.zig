@@ -1859,7 +1859,8 @@ test "ternary conditions preserve JavaScript optional string truthiness" {
 
     // The presence rule belongs to JSX && guards; a ternary keeps JS truthiness.
     try expectContains(zig_out, "if ((if (props.hint) |value| value.len != 0 else false)) {");
-    try expectContains(zig_out, "if (props.hint) |value_1| {");
+    // Inside the arm `hint` is there, as TypeScript narrows it.
+    try expectContains(zig_out, "try rt.escape(w, (props.hint).?);");
 }
 
 test "the Vite adapter transforms both PJSX extensions" {

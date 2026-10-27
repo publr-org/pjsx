@@ -4042,11 +4042,16 @@ const Generator = struct {
                 }
                 const was_root = gen.at_root;
                 gen.at_root = false;
-                const test_code = try gen.truthy(try gen.expression(conditional.@"test"));
+                const tested = try gen.expression(conditional.@"test");
+                const test_code = try gen.truthy(tested);
+                const present_count = gen.present_values.items.len;
+                defer gen.present_values.shrinkRetainingCapacity(present_count);
                 try gen.line("if ({s}) {{", .{test_code});
                 gen.indent += 1;
                 gen.at_root = was_root;
+                try gen.narrow(conditional.@"test", tested, true);
                 try gen.child_expression(conditional.consequent);
+                gen.present_values.shrinkRetainingCapacity(present_count);
                 gen.at_root = false;
                 try gen.flush();
                 gen.indent -= 1;
@@ -4057,6 +4062,7 @@ const Generator = struct {
                     try gen.line("}} else {{", .{});
                     gen.indent += 1;
                     gen.at_root = was_root;
+                    try gen.narrow(conditional.@"test", tested, false);
                     try gen.child_expression(conditional.alternate);
                     gen.at_root = false;
                     try gen.flush();
@@ -4215,6 +4221,23 @@ const Generator = struct {
         try gen.flush();
         gen.indent -= 1;
         try gen.line("}}", .{});
+    }
+
+    /// `x !== null ? a : b` (or `x ? a : b`) has x there in a, `x === null ? a : b` in b,
+    /// as TypeScript narrows it: the arm's reads of x unwrap it.
+    fn narrow(gen: *Generator, condition: *const ExpressionIR, tested: Lowered, consequent: bool) Error!void {
+        const there = if (consequent)
+            if (present_test(condition)) |value|
+                try gen.expression(value)
+            else if (tested.type.is_optional() and tested.type != .opt_boolean)
+                tested
+            else
+                return
+        else if (absent_test(condition)) |value|
+            try gen.expression(value)
+        else
+            return;
+        if (there.type.is_optional()) try gen.present_values.append(gen.arena, there.code);
     }
 
     fn prop_branch(gen: *Generator, body: *const ExpressionIR, capture: []const u8, condition: *const ExpressionIR, inverse: bool) Error!void {
@@ -5987,8 +6010,14 @@ const Generator = struct {
             },
             .operation => return gen.operation(e),
             .conditional => |conditional| {
-                const test_code = try gen.truthy(try gen.expression(conditional.@"test"));
+                const tested = try gen.expression(conditional.@"test");
+                const test_code = try gen.truthy(tested);
+                const present_count = gen.present_values.items.len;
+                defer gen.present_values.shrinkRetainingCapacity(present_count);
+                try gen.narrow(conditional.@"test", tested, true);
                 const consequent = try gen.expression(conditional.consequent);
+                gen.present_values.shrinkRetainingCapacity(present_count);
+                try gen.narrow(conditional.@"test", tested, false);
                 const alternate = try gen.expression(conditional.alternate);
 
                 return gen.select(test_code, consequent, alternate);
@@ -6876,9 +6905,18 @@ fn is_null_literal(e: *const ExpressionIR) bool {
 
 /// The value `x !== null` (or `!=`, or against `undefined`) tests is there, else null.
 fn present_test(e: *const ExpressionIR) ?*const ExpressionIR {
+    return null_test(e, "!==", "!=");
+}
+
+/// The value `x === null` (or `==`, or against `undefined`) tests is missing, else null.
+fn absent_test(e: *const ExpressionIR) ?*const ExpressionIR {
+    return null_test(e, "===", "==");
+}
+
+fn null_test(e: *const ExpressionIR, strict: []const u8, loose: []const u8) ?*const ExpressionIR {
     if (e.* != .operation) return null;
     const operation = e.operation;
-    if (!std.mem.eql(u8, operation.operator, "!==") and !std.mem.eql(u8, operation.operator, "!=")) return null;
+    if (!std.mem.eql(u8, operation.operator, strict) and !std.mem.eql(u8, operation.operator, loose)) return null;
     const absent = struct {
         fn is(side: *const ExpressionIR) bool {
             return is_null_literal(side) or side.* == .absent;

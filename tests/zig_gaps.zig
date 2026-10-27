@@ -1113,6 +1113,8 @@ test "closed gap: an object prop that may be null" {
             \\      <input value={ctx.value?.name ?? ""} />
             \\      <input value={`${ctx.value?.lat ?? 0}`} />
             \\      {ctx.value !== null && <p>{ctx.value.name}</p>}
+            \\      <input value={ctx.value === null ? "" : `${ctx.value.lat}`} />
+            \\      <b>{ctx.value ? ctx.value.name : "None"}</b>
             \\      <Shown place={ctx.value} />
             \\    </div>
             \\  );
@@ -1125,6 +1127,9 @@ test "closed gap: an object prop that may be null" {
     try expectContains(code, "(if (props.ctx.value) |present_2| @as(?f64, present_2.lat) else null)");
     try expectContains(code, "try rt.escape(w, (props.ctx.value).?.name);");
     try expectContains(code, ".place = (if (props.ctx.value) |present_");
+    // A ternary narrows as `&&` does: the arm where the value is there unwraps it.
+    try expectContains(code, "(if ((props.ctx.value == null)) \"\" else try std.fmt.allocPrint(arena, \"{s}\", .{ try rt.number_to_string(arena, (props.ctx.value).?.lat), }))");
+    try std.testing.expectEqual(2, std.mem.count(u8, code, "try rt.escape(w, (props.ctx.value).?.name);"));
     const shown = try lowersNative(arena.allocator(), &sources, "Shown");
     try expectContains(shown, "place: ?Place,");
 }
