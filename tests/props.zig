@@ -150,10 +150,6 @@ test "unsupported tuple shapes and Zig defaults fail instead of silently changin
         \\export function Example({ value = next() }: { value?: number }) { return <div>{value}</div>; }
     ));
     try contains(pjsx.lastError(), "default expression");
-    try std.testing.expectError(error.Pjsx, lower(a,
-        \\export function Example({ value }: { value: string | null }) { return <div>{value}</div>; }
-    ));
-    try contains(pjsx.lastError(), "nullable");
 }
 
 test "a broad string union stays a string and a guard narrows a child prop" {

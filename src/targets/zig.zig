@@ -163,6 +163,9 @@ const Field = struct {
     /// List props carry one too: a caller's reactive list crosses the boundary, and the
     /// callee's `.map` over it draws a reactive list bound to the caller's state.
     list_transport: bool = false,
+    /// Declared as possibly null (`string | null`): none is `null` to the browser's
+    /// expressions, not `undefined` as for a prop left out.
+    nullable: bool = false,
 };
 
 /// One module of the compile set, adapted from the typed IR into the shapes
@@ -843,8 +846,14 @@ fn adapt_props(
         if (spec.default_expression != null and spec.default == null and !empty_array_default) {
             return err.fail("{s}.{s}: this default expression cannot yet be lowered to Zig", .{ where, name });
         }
-        if (spec.nullable and spec.type != .node and spec.type != .object) {
+        // A primitive that may be null (`value: string | null`) is an optional: absent and
+        // null read the same.
+        const primitive = spec.type == .string or spec.type == .number or spec.type == .boolean;
+        if (spec.nullable and !primitive and spec.type != .node and spec.type != .object) {
             return err.fail("{s}.{s}: this nullable prop cannot yet be represented faithfully by the Zig target", .{ where, name });
+        }
+        if (spec.nullable and primitive and spec.values != null) {
+            return err.fail("{s}.{s}: a nullable union of values is not lowered yet", .{ where, name });
         }
         var prop_type: Type = undefined;
         var zig_type: ?[]const u8 = null;
@@ -911,9 +920,9 @@ fn adapt_props(
             .string => {
                 // An optional string with a schema default is never absent: the
                 // default fills it (`classes: ""` → `classes: []const u8 = ""`).
-                if (spec.optional and spec.default == null) {
+                if ((spec.optional or spec.nullable) and spec.default == null) {
                     prop_type = .opt_string;
-                    default_code = "null";
+                    if (spec.optional) default_code = "null";
                 } else {
                     prop_type = .string;
                     if (spec.default) |d| {
@@ -927,7 +936,7 @@ fn adapt_props(
                 default_code = "null";
             },
             .boolean => {
-                prop_type = if (spec.typescript != null and spec.optional and spec.default == null) .opt_boolean else .boolean;
+                prop_type = if (((spec.typescript != null and spec.optional) or spec.nullable) and spec.default == null) .opt_boolean else .boolean;
                 default_code = if (spec.default) |d| switch (d) {
                     .boolean => |b| if (b) "true" else "false",
                     else => return err.fail("{s}.{s}: non-boolean default", .{ where, name }),
@@ -938,7 +947,7 @@ fn adapt_props(
                 default_code = "null";
             },
             .number => {
-                prop_type = if (spec.optional and spec.default == null) .opt_number else .number;
+                prop_type = if ((spec.optional or spec.nullable) and spec.default == null) .opt_number else .number;
                 if (spec.optional and spec.default == null) default_code = "null";
                 if (spec.default) |d| {
                     default_code = try zig_number_literal(arena, d, where, name);
@@ -1045,6 +1054,7 @@ fn adapt_props(
                 else => false,
             },
             .list_transport = prop_type == .array or prop_type == .strings,
+            .nullable = spec.nullable,
         });
     }
 
@@ -4909,6 +4919,8 @@ const Generator = struct {
         value: []const u8,
         /// Zig code of the caller's wire for it, for a prop that can carry one.
         wire: ?[]const u8,
+        /// A prop that may be null: none is `null`, not `undefined`.
+        nullable: bool = false,
     };
 
     const SlotCall = struct {
@@ -4969,6 +4981,7 @@ const Generator = struct {
                         .name = name,
                         .value = try std.fmt.allocPrint(gen.arena, "props.{f}", .{std.zig.fmtId(name)}),
                         .wire = if (field.bind_transport) try std.fmt.allocPrint(gen.arena, "props.publr_bind_{s}", .{name}) else null,
+                        .nullable = field.nullable,
                     });
 
                     wirable = wirable or field.bind_transport;
@@ -5394,9 +5407,10 @@ const Generator = struct {
         var condition: std.Io.Writer.Allocating = .init(gen.arena);
         try parts.writer.print("\"${s}(\"", .{call.name});
         for (call.arguments, 0..) |argument, at| {
-            try parts.writer.print(", \"{s}{s}: \", rt.slot_argument(arena, {s}, {s})", .{
+            try parts.writer.print(", \"{s}{s}: \", rt.{s}(arena, {s}, {s})", .{
                 if (at > 0) ", " else "",
                 argument.name,
+                if (argument.nullable) "slot_nullable" else "slot_argument",
                 argument.wire orelse "null",
                 argument.value,
             });
@@ -6385,6 +6399,27 @@ const Generator = struct {
                 return gen.fail("comparing a {s} with null", .{@tagName(subject.type)});
             }
             return std.fmt.allocPrint(gen.arena, "({s} == null)", .{subject.code});
+        }
+
+        // A value that may be null against one that can't (`on === true`, `size === 3`):
+        // equal only when present and the same.
+        if (left.type.is_optional() != right.type.is_optional()) {
+            const maybe = if (left.type.is_optional()) left else right;
+            const known = if (left.type.is_optional()) right else left;
+            const primitive = switch (maybe.type) {
+                .opt_string, .opt_boolean, .opt_number, .opt_enumeration => true,
+                else => false,
+            };
+            const same = std.meta.activeTag(maybe.type.unwrapped()) == std.meta.activeTag(known.type);
+            const tag = maybe.type == .opt_enumeration and known.type == .string;
+            if (primitive and (same or tag)) {
+                const present = try gen.fresh("present");
+                const inner = try gen.equals(.{
+                    .code = present,
+                    .type = maybe.type.unwrapped(),
+                }, known);
+                return std.fmt.allocPrint(gen.arena, "(if ({s}) |{s}| {s} else false)", .{ maybe.code, present, inner });
+            }
         }
 
         if (left.type == .union_typeof or right.type == .union_typeof) {

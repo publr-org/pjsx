@@ -529,6 +529,13 @@ pub fn slot_argument(arena: std.mem.Allocator, wire: ?[]const u8, value: anytype
     return std.json.Stringify.valueAlloc(arena, value, .{}) catch "null";
 }
 
+/// `slot_argument` for a prop that may be null: none is `null` to the expression.
+pub fn slot_nullable(arena: std.mem.Allocator, wire: ?[]const u8, value: anytype) []const u8 {
+    comptime std.debug.assert(@typeInfo(@TypeOf(value)) == .optional);
+    if (wire) |present| return present;
+    return if (value) |present| slot_argument(arena, null, present) else "null";
+}
+
 /// A style attribute's text from `name`/value pairs, the absent and empty values left
 /// out; null when none is left.
 pub fn style_text(arena: std.mem.Allocator, pairs: []const struct {
@@ -1280,6 +1287,8 @@ test "a slot argument is the caller's wire, else the value as JSON" {
     try std.testing.expectEqualStrings("\"success\"", slot_argument(a, null, Tone.success));
     try std.testing.expectEqualStrings("\"a \\\"b\\\"\"", slot_argument(a, null, @as([]const u8, "a \"b\"")));
     try std.testing.expectEqualStrings("undefined", slot_argument(a, null, @as(?[]const u8, null)));
+    try std.testing.expectEqualStrings("null", slot_nullable(a, null, @as(?[]const u8, null)));
+    try std.testing.expectEqualStrings("\"x\"", slot_nullable(a, null, @as(?[]const u8, "x")));
     try std.testing.expectEqualStrings("\"x\"", slot_argument(a, null, @as(?[]const u8, "x")));
     try std.testing.expectEqualStrings("true", slot_argument(a, null, true));
 }

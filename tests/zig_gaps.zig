@@ -1129,6 +1129,44 @@ test "closed gap: an object prop that may be null" {
     try expectContains(shown, "place: ?Place,");
 }
 
+test "closed gap: a text, number or switch prop that may be null" {
+    // A field's help view: `value: string | null`, null while the field holds nothing.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const sources = [_][2][]const u8{
+        .{
+            "Meter.ptsx",
+            \\export type MeterProps = { text: string | null; size: number | null; on: boolean | null };
+            \\export function Meter({ text, size, on }: MeterProps) {
+            \\  return <i title={text ?? ""}>{(text ?? "").length >= 10 ? "Fair" : "Weak"}{size ?? 0}{on === true && <b>On</b>}</i>;
+            \\}
+        },
+        .{
+            "Help.ptsx",
+            \\import { Meter } from "./Meter.ptsx";
+            \\export type HelpProps = { ctx: { value: string | null } };
+            \\export function Help({ ctx }: HelpProps) {
+            \\  return (
+            \\    <div>
+            \\      {ctx.value !== null && <p>{ctx.value}</p>}
+            \\      <Meter text={ctx.value} size={null} on={null} />
+            \\    </div>
+            \\  );
+            \\}
+        },
+    };
+    const meter = try lowersNative(arena.allocator(), &sources, "Meter");
+    try expectContains(meter, "text: ?[]const u8,");
+    try expectContains(meter, "size: ?f64,");
+    try expectContains(meter, "on: ?bool,");
+    // The browser's expressions see none as null, as declared.
+    try expectContains(meter, "rt.slot_nullable(arena, props.publr_bind_size, props.size)");
+    try expectContains(meter, "(if (props.on) |present_1| (present_1 == true) else false)");
+    const help = try lowersNative(arena.allocator(), &sources, "Help");
+    try expectContains(help, "value: ?[]const u8,");
+    try expectContains(help, ".text = props.ctx.value");
+}
+
 test "closed gap: String(x) lowers without the engine" {
     // An installed plugin's view: `String(row.count)` in a list.
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
