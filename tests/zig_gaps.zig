@@ -1134,6 +1134,25 @@ test "closed gap: an object prop that may be null" {
     try expectContains(shown, "place: ?Place,");
 }
 
+test "closed gap: a union of values that may be null" {
+    // A dimension's setting on the field panel: `value: "same" | "own" | null`, null while
+    // the field holds none of the owner's values.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const sources = [_][2][]const u8{
+        .{
+            "Printed.ptsx",
+            \\export type PrintedProps = { ctx: { value: "same" | "own" | null } };
+            \\export function Printed({ ctx }: PrintedProps) {
+            \\  return <input type="checkbox" checked={ctx.value === "own"} data-held={ctx.value ?? "same"} />;
+            \\}
+        },
+    };
+    const code = try lowersNative(arena.allocator(), &sources, "Printed");
+    try expectContains(code, "@\"same\", @\"own\",");
+    try expectContains(code, "value: ?CtxValue,");
+}
+
 test "closed gap: a text, number or switch prop that may be null" {
     // A field's help view: `value: string | null`, null while the field holds nothing.
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
