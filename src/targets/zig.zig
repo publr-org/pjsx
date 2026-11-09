@@ -643,13 +643,20 @@ fn adapt_module(arena: std.mem.Allocator, ir: *const compiler.ModuleIR) Error!Mo
             // yet; family refs (below) are the supported form.
             return err.fail("{s}: component-local refs are not lowered", .{component.name});
         }
+        var seed_exprs = try arena.alloc(Module.Seed, reactive.seed_exprs.len);
+        for (reactive.seed_exprs, 0..) |seed, i| {
+            seed_exprs[i] = .{
+                .field = seed.field,
+                .expr = seed.value,
+            };
+        }
         wire = .{
             .store = reactive.store,
             .kind = .reactive,
             .state_name = null,
             .actions = reactive.actions,
             .refs = &.{},
-            .seed_exprs = &.{},
+            .seed_exprs = seed_exprs,
             .initials = try adapt_initials(arena, reactive.initial),
         };
     }
@@ -855,8 +862,10 @@ fn adapt_props(
         if (spec.nullable and !primitive and spec.type != .node and spec.type != .object) {
             return err.fail("{s}.{s}: this nullable prop cannot yet be represented faithfully by the Zig target", .{ where, name });
         }
-        if (spec.nullable and primitive and spec.values != null) {
-            return err.fail("{s}.{s}: a nullable union of values is not lowered yet", .{ where, name });
+        // A union of values that may be null (`value: "a" | "b" | null`) is an optional
+        // enum, as a string that may be null is an optional string.
+        if (spec.nullable and primitive and spec.values != null and spec.type != .string) {
+            return err.fail("{s}.{s}: a nullable union of numbers or booleans is not lowered yet", .{ where, name });
         }
         var prop_type: Type = undefined;
         var zig_type: ?[]const u8 = null;
@@ -903,7 +912,13 @@ fn adapt_props(
                 break :blk null;
             } else null;
 
-            if ((spec.default != null and listed_default == null) or (spec.typescript != null and spec.optional and spec.default == null)) {
+            if (spec.nullable and spec.default == null) {
+                prop_type = .{
+                    .opt_enumeration = enumeration,
+                };
+                zig_type = try std.fmt.allocPrint(arena, "?{s}", .{enum_name});
+                if (spec.optional) default_code = "null";
+            } else if ((spec.default != null and listed_default == null) or (spec.typescript != null and spec.optional and spec.default == null)) {
                 prop_type = .{
                     .opt_enumeration = enumeration,
                 };
@@ -3136,27 +3151,12 @@ const Generator = struct {
                                 gen.arena_used = true;
                                 try fields.writer.print(" .{f} = try rt.prop_array(@FieldType({s}.Props, \"{s}\"), arena, {s}),", .{ std.zig.fmtId(attribute_name), name, attribute_name, initial.code });
                             } else try fields.writer.print(" .{f} = {s},", .{ std.zig.fmtId(attribute_name), (if (target.type.unwrapped() == .enumeration) try gen.enum_expression(value, target.type) else null) orelse try gen.coerce(initial, target.type) }),
-                            .unservable => {},
+                            // No SSR value: inside a row template the
+                            // prototype still takes the placeholder below.
+                            .unservable => if (gen.template_depth > 0) try gen.prop_placeholder(&fields, attribute_name, target),
                         }
                     }
-                    // A template's prototype renders before any row: a prop
-                    // the wire fills takes a placeholder — present, as the
-                    // wired value is (`href === undefined` picks the tag).
-                    if (!wired.own and gen.template_depth > 0) {
-                        const required = target.default == null and !target.type.is_optional();
-                        const placeholder: ?[]const u8 = switch (target.type) {
-                            .string, .opt_string => "\"\"",
-                            .enumeration => |e| if (required) try std.fmt.allocPrint(gen.arena, ".@\"{s}\"", .{e.values[0]}) else null,
-                            .opt_enumeration => |e| try std.fmt.allocPrint(gen.arena, ".@\"{s}\"", .{e.values[0]}),
-                            .number => if (required) "0" else null,
-                            .opt_number => "0",
-                            .boolean => if (required) "false" else null,
-                            .opt_boolean => "false",
-                            .array, .strings => "&.{}",
-                            else => null,
-                        };
-                        if (placeholder) |code| try fields.writer.print(" .{f} = {s},", .{ std.zig.fmtId(attribute_name), code });
-                    }
+                    if (!wired.own and gen.template_depth > 0) try gen.prop_placeholder(&fields, attribute_name, target);
                     try fields.writer.print(" .publr_bind_{s} = {s},", .{ attribute_name, try zig_string(gen.arena, wired.spec) });
                     continue;
                 }
@@ -3520,6 +3520,8 @@ const Generator = struct {
         try gen.line("pub fn render(cap: anytype, w: *std.Io.Writer, arena: std.mem.Allocator, publr_family_given: ?*const rt.Family) anyerror!void {{", .{});
         gen.indent += 1;
         try gen.line("_ = &arena;", .{});
+        // Children that draw nothing (`{""}`) write nothing.
+        try gen.line("_ = &w;", .{});
         try gen.line("const props = cap.props.*;", .{});
         try gen.line("_ = &props;", .{});
         // Rendered inside the family roots of whoever renders the node, else the caller's.
@@ -5096,6 +5098,9 @@ const Generator = struct {
                         if (std.mem.eql(u8, binding.name, name)) break at;
                     } else null;
                     if (binding_index) |at| {
+                        // A binding JavaScript cannot carry (a function with statements)
+                        // leaves the expression to the browser's own module code.
+                        if (!expression_js.printable(gen.module.bindings[at].value)) return null;
                         if (std.mem.indexOfScalar(usize, inlined.items, at) == null) {
                             try inlined.append(gen.arena, at);
                             try pending.appendSlice(gen.arena, try expression_js.references(gen.arena, gen.module.bindings[at].value));
@@ -5598,6 +5603,25 @@ const Generator = struct {
 
     /// The expression as a wire spec, or null when it does not read state: a plain
     /// state or row path, else a compiled expression's slot.
+    /// A template's prototype renders before any row: a prop the wire fills
+    /// takes a placeholder — present, as the wired value is (`href ===
+    /// undefined` picks the tag).
+    fn prop_placeholder(gen: *Generator, fields: *std.Io.Writer.Allocating, attribute_name: []const u8, target: Field) Error!void {
+        const required = target.default == null and !target.type.is_optional();
+        const placeholder: ?[]const u8 = switch (target.type) {
+            .string, .opt_string => "\"\"",
+            .enumeration => |e| if (required) try std.fmt.allocPrint(gen.arena, ".@\"{s}\"", .{e.values[0]}) else null,
+            .opt_enumeration => |e| try std.fmt.allocPrint(gen.arena, ".@\"{s}\"", .{e.values[0]}),
+            .number => if (required) "0" else null,
+            .opt_number => "0",
+            .boolean => if (required) "false" else null,
+            .opt_boolean => "false",
+            .array, .strings => "&.{}",
+            else => null,
+        };
+        if (placeholder) |code| try fields.writer.print(" .{f} = {s},", .{ std.zig.fmtId(attribute_name), code });
+    }
+
     fn wire_spec(gen: *Generator, e: *const ExpressionIR) Error!?Wired {
         if (gen.wire_state_path(e)) |path| {
             if (path.spec.len == 0) return null; // the bare state object is not a wire

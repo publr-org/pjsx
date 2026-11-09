@@ -1436,7 +1436,10 @@ test "a reactive numeric field wires through an SSR + wire attribute pair" {
     ;
     const zig_out = try zigCode(arena.a(), numeric_value_source, "numeric-value.ptsx");
 
-    try expectContains(zig_out, "data-p-store=\\\"numeric-value\\\" value=\\\"0\\\"");
+    // The prop that seeds the state rides in `data-p`, for the store to start from.
+    try expectContains(zig_out, "data-p-store=\\\"numeric-value\\\" data-p=\\\"{&quot;value&quot;:");
+    try expectContains(zig_out, "try rt.write_number(w, props.initial);");
+    try expectContains(zig_out, "}\\\" value=\\\"0\\\"");
     try expectContains(zig_out, " data-p-bind=\\\"value:$value\\\">");
 }
 

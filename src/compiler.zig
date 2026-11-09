@@ -259,6 +259,9 @@ pub const ReactiveIR = struct {
     actions: []const []const u8,
     refs: []const []const u8,
     initial: []const InitialIR = &.{},
+    /// The state fields a prop seeds (`value: ctx.value ?? "none"`): the server writes
+    /// them into the root's `data-p`, as a family's, for the store to start from.
+    seed_exprs: []const SeedIR = &.{},
 };
 pub const FamilyIR = struct {
     store: []const u8,
@@ -893,11 +896,23 @@ pub fn createPjsxModule(allocator: Allocator, original_source: []const u8, filen
     const root = try nodeIR(allocator, parsed.component.root, parsed);
     var reactive: ?ReactiveIR = null;
     if (parsed.component.reactive) |r| {
+        const prop_seeds = if (r.foreign)
+            &.{}
+        else
+            try store.reactivePropSeeds(allocator, &r, &parsed.component.prop_bindings);
+        var seed_exprs = try allocator.alloc(SeedIR, prop_seeds.len);
+        for (prop_seeds, 0..) |seed, i| {
+            seed_exprs[i] = .{
+                .field = seed.state_field,
+                .value = try expressionIR(allocator, seed.value, parsed),
+            };
+        }
         reactive = .{
             .store = r.wire_name,
             .actions = r.actions,
             .refs = try refNames(allocator, r.refs),
             .initial = if (r.foreign) &.{} else try initialIR(allocator, r.initial_state, parsed),
+            .seed_exprs = seed_exprs,
         };
     }
     var family: ?FamilyIR = null;
