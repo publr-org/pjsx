@@ -333,6 +333,68 @@ pub const ReactivePropSeed = struct {
     value: *Node,
 };
 
+/// A prop the store's browser code reads beyond the state's seeded fields (a helper that
+/// compares it, an effect that shows it): the server writes it into the root's `data-p` as
+/// `"$<prop>"` and the store's factory reads it from `props`, so it is never `undefined` there.
+pub const BrowserPropRead = struct {
+    prop_name: []const u8,
+    binding: []const u8,
+    /// A read of it, for the server to lower into the seed.
+    node: *Node,
+};
+
+/// The props `reactive`'s module statements read, each once, in the order first read; `ctx`
+/// and actions travel their own ways.
+pub fn browserPropReads(a: Allocator, reactive: *const ReactiveBinding, bindings: *const Bindings) Allocator.Error![]const BrowserPropRead {
+    var found: std.ArrayList(BrowserPropRead) = .empty;
+    for (reactive.local_statements) |statement| try collectPropReads(a, statement, reactive, bindings, &found);
+    return found.toOwnedSlice(a);
+}
+
+fn collectPropReads(
+    a: Allocator,
+    node: *Node,
+    reactive: *const ReactiveBinding,
+    bindings: *const Bindings,
+    found: *std.ArrayList(BrowserPropRead),
+) Allocator.Error!void {
+    if (node.type == .Identifier) {
+        const prop_name = bindings.get(node.name) orelse return;
+        if (eql(prop_name, "$props") or eql(prop_name, "ctx") or reactive.hasAction(node.name)) return;
+        if (std.mem.indexOfScalar(u8, node.name, '.') != null) return;
+        for (found.items) |read| if (eql(read.binding, node.name)) return;
+        try found.append(a, .{
+            .prop_name = prop_name,
+            .binding = node.name,
+            .node = node,
+        });
+        return;
+    }
+    switch (node.type) {
+        // A key or a member's name spells a name, not a read.
+        .Property => {
+            if (node.computed) if (node.key) |key| try collectPropReads(a, key, reactive, bindings, found);
+            if (node.value_node) |value| try collectPropReads(a, value, reactive, bindings, found);
+            return;
+        },
+        .MemberExpression => {
+            if (node.object) |object| try collectPropReads(a, object, reactive, bindings, found);
+            if (node.computed) if (node.property) |property| try collectPropReads(a, property, reactive, bindings, found);
+            return;
+        },
+        else => {},
+    }
+    for (ast.childFields(node.type)) |child_field| {
+        if (child_field[1]) {
+            for (ast.getList(node, child_field[0])) |child| {
+                if (child) |next| try collectPropReads(a, next, reactive, bindings, found);
+            }
+        } else if (ast.getSingle(node, child_field[0])) |child| {
+            try collectPropReads(a, child, reactive, bindings, found);
+        }
+    }
+}
+
 fn initialBoundProp(a: Allocator, node: *Node, bindings: *const Bindings) Allocator.Error!?[]const u8 {
     const value = unwrap(node);
     if (try boundPropName(a, value, bindings)) |direct| return direct;
@@ -442,6 +504,8 @@ pub fn lowerParsedStoreRegistration(allocator: Allocator, parsed_ptr: *const ana
         .finite_maps = &finite_maps,
     };
 
+    // Props the browser code reads past the seeded state come in `data-p` as `"$<prop>"`.
+    const browser_props = try browserPropReads(a, &reactive, &parsed.component.prop_bindings);
     var prop_fallbacks: StringList = .empty;
     for (parsed.component.prop_bindings.keys(), parsed.component.prop_bindings.values()) |binding, prop_name| {
         if (!util.isIdentifierName(binding) or reactive.hasAction(binding)) continue;
@@ -453,6 +517,12 @@ pub fn lowerParsedStoreRegistration(allocator: Allocator, parsed_ptr: *const ana
         const field = parsed.schema.get(prop_name);
         const fallback = schemaFallback(field, null);
         const code = if (fallback == .undefined) "undefined" else try fallback.toJson(a);
+        var carried = false;
+        for (browser_props) |read| carried = carried or eql(read.binding, binding);
+        if (carried) {
+            try prop_fallbacks.append(a, try fmt(a, "const {s} = props?.[{s}] ?? {s};", .{ binding, try jsonString(a, prop_name), code }));
+            continue;
+        }
         try prop_fallbacks.append(a, try fmt(a, "const {s} = {s};", .{ binding, code }));
     }
 
@@ -511,10 +581,14 @@ pub fn lowerParsedStoreRegistration(allocator: Allocator, parsed_ptr: *const ana
 
     var code: std.ArrayList(u8) = .empty;
     if (family_reads.items.len > 0) {
-        try code.appendSlice(a, try fmt(a, "Publr.createLocalStore({s}, ({{ above }}) => {{\n", .{try jsonString(a, reactive.wire_name)}));
+        try code.appendSlice(a, try fmt(a, "Publr.createLocalStore({s}, ({{ above{s} }}) => {{\n", .{ try jsonString(a, reactive.wire_name), if (browser_props.len > 0) ", props" else "" }));
         try code.appendSlice(a, try fmt(a, "  {s}\n", .{try util.join(a, family_reads.items, "\n  ")}));
     } else {
-        try code.appendSlice(a, try fmt(a, "Publr.createLocalStore({s}, () => {{\n", .{try jsonString(a, reactive.wire_name)}));
+        if (browser_props.len > 0) {
+            try code.appendSlice(a, try fmt(a, "Publr.createLocalStore({s}, ({{ props }}) => {{\n", .{try jsonString(a, reactive.wire_name)}));
+        } else {
+            try code.appendSlice(a, try fmt(a, "Publr.createLocalStore({s}, () => {{\n", .{try jsonString(a, reactive.wire_name)}));
+        }
     }
     if (prop_fallbacks.items.len > 0) try code.appendSlice(a, try fmt(a, "  {s}\n", .{try util.join(a, prop_fallbacks.items, "\n  ")}));
     if (before.len > 0) try code.appendSlice(a, try fmt(a, "  {s}\n", .{try util.replaceAll(a, before, "\n", "\n  ")}));

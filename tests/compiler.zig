@@ -2190,3 +2190,29 @@ test "a stores file for some modules registers only theirs, importing the runtim
     try expectContains(own, "createLocalStore(\"drawer\"");
     try std.testing.expect(std.mem.indexOf(u8, own, "createLocalStore(\"disclosure\"") == null);
 }
+
+test "a prop the store's browser code reads rides in the seed and reaches the factory" {
+    var arena = Arena.init();
+    defer arena.deinit();
+    const module = createPjsxModule(arena.a(),
+        \\import { Publr } from "publr/dom";
+        \\export type StepsProps = { direction: string };
+        \\export function Steps({ direction }: StepsProps) {
+        \\  const state = Publr.reactive({ up: direction === "up", label: "" });
+        \\  const show = () => { state.label = state.up ? "Up" : "Down"; };
+        \\  const later = () => { state.label = direction; };
+        \\  Publr.effect(() => { show(); later(); });
+        \\  return <p>{state.label}</p>;
+        \\}
+    , "Steps.ptsx", .{}) catch |e| return report(e);
+    const program = pjsx.targets.zig.Program.init(arena.a(), &.{module}) catch |e| return report(e);
+    const listing = try program.listing(arena.a(), "Steps");
+    const stores = try program.storesFile(arena.a());
+
+    // Read past the seeded state (`later`), it travels as `"$direction"` beside it.
+    try expectContains(listing, ",&quot;$direction&quot;:");
+    try expectContains(listing, "try rt.write_seed_string(w, props.direction);");
+    try expectContains(stores, "Publr.createLocalStore(\"steps\", ({ props }) => {");
+    try expectContains(stores, "const direction = props?.[\"direction\"] ?? undefined;");
+    try expectNotContains(stores, "const direction = undefined;");
+}

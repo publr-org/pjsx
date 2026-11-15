@@ -900,11 +900,22 @@ pub fn createPjsxModule(allocator: Allocator, original_source: []const u8, filen
             &.{}
         else
             try store.reactivePropSeeds(allocator, &r, &parsed.component.prop_bindings);
-        var seed_exprs = try allocator.alloc(SeedIR, prop_seeds.len);
+        // Props the browser code reads past the seeded state ride beside it, as `"$<prop>"`.
+        const browser_props = if (r.foreign)
+            &.{}
+        else
+            try store.browserPropReads(allocator, &r, &parsed.component.prop_bindings);
+        var seed_exprs = try allocator.alloc(SeedIR, prop_seeds.len + browser_props.len);
         for (prop_seeds, 0..) |seed, i| {
             seed_exprs[i] = .{
                 .field = seed.state_field,
                 .value = try expressionIR(allocator, seed.value, parsed),
+            };
+        }
+        for (browser_props, prop_seeds.len..) |read, i| {
+            seed_exprs[i] = .{
+                .field = try std.fmt.allocPrint(allocator, "${s}", .{read.prop_name}),
+                .value = try expressionIR(allocator, read.node, parsed),
             };
         }
         reactive = .{
