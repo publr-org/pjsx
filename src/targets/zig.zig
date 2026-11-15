@@ -590,7 +590,20 @@ pub const Program = struct {
                 if (!std.mem.eql(u8, wire.store, registration.store)) continue;
                 try owned.appendSlice(arena, program.slots.get(owner.name) orelse &.{});
             }
-            try w.print("\n// {s}\n{s}\n", .{ module.name, try slots_file.withFactoryMember(arena, registration.code, owned.items) });
+            const registered = try slots_file.withFactoryMember(arena, registration.code, owned.items);
+            // The module's own helpers its store calls, in a block of their own: two
+            // modules may name a helper alike.
+            var helpers: std.ArrayList([]const u8) = .empty;
+            for (module.declarations) |declaration| {
+                if (declaration.store_bound or std.ascii.isUpper(declaration.name[0])) continue;
+                try helpers.append(arena, declaration.code);
+            }
+            if (helpers.items.len > 0) {
+                const code = try std.mem.join(arena, "\n", helpers.items);
+                try w.print("\n// {s}\n{{\n{s}\n{s}\n}}\n", .{ module.name, code, registered });
+            } else {
+                try w.print("\n// {s}\n{s}\n", .{ module.name, registered });
+            }
         }
 
         return out.written();
