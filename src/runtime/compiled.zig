@@ -177,8 +177,8 @@ pub fn json(w: *W, a: A, value: anytype) !void {
     if (@TypeOf(value) == Value) {
         try validate(value);
     } else {
-        inline for (@typeInfo(@TypeOf(value)).@"struct".fields) |field| {
-            if (field.type == Value) try validate(@field(value, field.name));
+        inline for (comptime std.meta.fieldNames(@TypeOf(value))) |name| {
+            if (@TypeOf(@field(value, name)) == Value) try validate(@field(value, name));
         }
     }
     var out: W.Allocating = .init(a);
@@ -234,12 +234,12 @@ pub const ResolvedOperation = struct {
 };
 pub fn nativeResult(comptime operation: anytype, ctx: anytype, a: A, args: []const Value) !ResolvedOperation {
     const info = @typeInfo(@TypeOf(operation)).@"fn";
-    if (args.len + 1 != info.params.len) return error.InvalidArguments;
+    if (args.len + 1 != info.param_types.len) return error.InvalidArguments;
     for (args) |arg| try validate(arg);
     var params: std.meta.ArgsTuple(@TypeOf(operation)) = undefined;
     params[0] = ctx;
-    inline for (info.params[1..], 0..) |parameter, index| {
-        const decoded = try std.json.parseFromValue(parameter.type.?, a, args[index], .{
+    inline for (info.param_types[1..], 0..) |Parameter, index| {
+        const decoded = try std.json.parseFromValue(Parameter.?, a, args[index], .{
             .ignore_unknown_fields = false,
             .allocate = .alloc_always,
         });
@@ -268,10 +268,10 @@ pub fn nativeResult(comptime operation: anytype, ctx: anytype, a: A, args: []con
 pub fn types(w: *W, comptime operation: anytype, comptime name: []const u8) !void {
     const info = @typeInfo(@TypeOf(operation)).@"fn";
     try w.print("export declare function {s}(", .{name});
-    inline for (info.params[1..], 0..) |parameter, index| {
+    inline for (info.param_types[1..], 0..) |Parameter, index| {
         if (index != 0) try w.writeAll(", ");
         try w.print("arg{d}: ", .{index});
-        try typeScript(w, parameter.type.?);
+        try typeScript(w, Parameter.?);
     }
     try w.writeAll("): Promise<");
     const Payload = @typeInfo(info.return_type.?).error_union.payload;
@@ -296,18 +296,18 @@ fn typeScript(w: *W, comptime T: type) !void {
         },
         .@"struct" => |structure| {
             try w.writeAll("{ ");
-            inline for (structure.fields) |field| {
-                try std.json.Stringify.value(field.name, .{}, w);
+            inline for (structure.field_names, structure.field_types) |name, Field| {
+                try std.json.Stringify.value(name, .{}, w);
                 try w.writeAll(": ");
-                try typeScript(w, field.type);
+                try typeScript(w, Field);
                 try w.writeAll("; ");
             }
             try w.writeAll("}");
         },
         .@"enum" => |enumeration| {
-            inline for (enumeration.fields, 0..) |field, index| {
+            inline for (enumeration.field_names, 0..) |name, index| {
                 if (index != 0) try w.writeAll(" | ");
-                try std.json.Stringify.value(field.name, .{}, w);
+                try std.json.Stringify.value(name, .{}, w);
             }
         },
         .void, .null => try w.writeAll("null"),

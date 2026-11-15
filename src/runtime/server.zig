@@ -247,8 +247,8 @@ fn prop_value(comptime Target: type, arena: std.mem.Allocator, source: anytype) 
     switch (@typeInfo(Target)) {
         .@"struct" => |info| {
             var result: Target = undefined;
-            inline for (info.fields) |field| {
-                @field(result, field.name) = try prop_value(field.type, arena, @field(source, field.name));
+            inline for (info.field_names, info.field_types) |name, Field| {
+                @field(result, name) = try prop_value(Field, arena, @field(source, name));
             }
             return result;
         },
@@ -347,9 +347,9 @@ test "array prop conversion reports allocation failures at every nesting level" 
                     text: []const u8,
                 },
             };
-            const values = [_]SourceValue{.{
+            const values: [256]SourceValue = @splat(.{
                 .text = "nested",
-            }} ** 256;
+            });
             const source: []const Source = &.{.{
                 .values = &values,
             }};
@@ -879,13 +879,13 @@ pub fn slot_props(arena: std.mem.Allocator, child: []const u8, attrs: anytype) [
     const base = slot_merge_base(child);
     if (root_attr_insert_pos(child[base..]) == null) @panic("Slot requires exactly one Element child");
     var merged = child[base..];
-    inline for (@typeInfo(@TypeOf(attrs)).@"struct".fields) |field| {
-        const value = @field(attrs, field.name);
-        switch (@typeInfo(field.type)) {
+    inline for (comptime std.meta.fieldNames(@TypeOf(attrs))) |name| {
+        const value = @field(attrs, name);
+        switch (@typeInfo(@TypeOf(value))) {
             .optional => if (value) |inner| {
-                merged = merge_slot_attr(arena, merged, field.name, inner);
+                merged = merge_slot_attr(arena, merged, name, inner);
             },
-            else => merged = merge_slot_attr(arena, merged, field.name, value),
+            else => merged = merge_slot_attr(arena, merged, name, value),
         }
     }
     if (base == 0) return merged;
@@ -1080,19 +1080,15 @@ test "merge_classes delegates to the consumer's class_merge module" {
 /// The return type follows the field's, so it composes with `orelse` whether
 /// the prop is a plain string with a default or an optional one.
 pub fn PropDefault(comptime Props: type, comptime name: []const u8) type {
-    inline for (@typeInfo(Props).@"struct".fields) |field| {
-        if (comptime std.mem.eql(u8, field.name, name)) return field.type;
-    }
+    if (std.meta.fieldIndex(Props, name)) |index| return @typeInfo(Props).@"struct".field_types[index];
     @compileError(@typeName(Props) ++ " has no prop named " ++ name);
 }
 
 pub fn prop_default(comptime Props: type, comptime name: []const u8) PropDefault(Props, name) {
-    inline for (@typeInfo(Props).@"struct".fields) |field| {
-        if (comptime std.mem.eql(u8, field.name, name)) {
-            const ptr = field.default_value_ptr orelse
-                @compileError(@typeName(Props) ++ "." ++ name ++ " has no default");
-            return @as(*const field.type, @ptrCast(@alignCast(ptr))).*;
-        }
+    const info = @typeInfo(Props).@"struct";
+    if (std.meta.fieldIndex(Props, name)) |index| {
+        return info.field_attrs[index].defaultValue(info.field_types[index]) orelse
+            @compileError(@typeName(Props) ++ "." ++ name ++ " has no default");
     }
     @compileError(@typeName(Props) ++ " has no prop named " ++ name);
 }

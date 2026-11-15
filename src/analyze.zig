@@ -45,8 +45,7 @@ pub const PropType = enum {
     }
 
     pub fn parse(text: []const u8) ?PropType {
-        inline for (std.meta.fields(PropType)) |field| {
-            const value: PropType = @enumFromInt(field.value);
+        inline for (comptime std.meta.tags(PropType)) |value| {
             if (util.eql(value.name(), text)) return value;
         }
         return null;

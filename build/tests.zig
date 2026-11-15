@@ -10,7 +10,7 @@ pub fn build(b: *std.Build, library: *std.Build.Module, amalgamation: *std.Build
     // The integration suite reads repo sources for its "no backend names in
     // the core" contract tests.
     const test_options = b.addOptions();
-    test_options.addOption([]const u8, "root", b.build_root.path orelse ".");
+    test_options.addOption([]const u8, "root", b.root.toString(b.graph.arena) catch @panic("OOM"));
     // The design-system corpus for the zig-target integration test; the test
     // skips when unset.
     test_options.addOption(?[]const u8, "ds_root", b.option([]const u8, "ds_root", "Path to design-system-v2/src/components for the corpus test"));
@@ -71,7 +71,7 @@ pub fn build(b: *std.Build, library: *std.Build.Module, amalgamation: *std.Build
         .root_module = b.createModule(.{
             .root_source_file = b.path("../publr/scripts/tidy.zig"),
             .target = b.graph.host,
-            .optimize = .Debug,
+            .optimize = .debug,
         }),
     });
     const run_tidy = b.addRunArtifact(tidy);

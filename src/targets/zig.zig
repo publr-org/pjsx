@@ -269,15 +269,15 @@ pub fn requestFields(comptime Request: type) []const Field {
 
 /// The fields a view reads; a `publr_` field is the render's own (its engine), not one.
 fn request_fields_of(comptime Request: type) []const Field {
-    const declared = @typeInfo(Request).@"struct".fields;
-    var fields: [declared.len]Field = undefined;
+    const declared = @typeInfo(Request).@"struct";
+    var fields: [declared.field_names.len]Field = undefined;
     var count: usize = 0;
-    for (declared) |field| {
-        if (std.mem.startsWith(u8, field.name, "publr_")) continue;
+    for (declared.field_names, declared.field_types) |name, Declared| {
+        if (std.mem.startsWith(u8, name, "publr_")) continue;
         fields[count] = .{
-            .name = field.name,
-            .type = request_type(field.type),
-            .zig_type = @typeName(field.type),
+            .name = name,
+            .type = request_type(Declared),
+            .zig_type = @typeName(Declared),
             .default = null,
         };
         count += 1;
@@ -3269,14 +3269,22 @@ const Generator = struct {
         // here once. Such a block is always present, even when it draws nothing.
         if (e.* != .node and gen.reads_state(e)) {
             const holder = try gen.arena.create(NodeIR);
-            holder.* = .{ .expression = .{ .value = e } };
+            holder.* = .{
+                .expression = .{
+                    .value = e,
+                },
+            };
             return gen.markup_block(holder);
         }
         // `items={rows.map((row) => <Row/>)}`: the list drawn as a block, its body the same
         // loop a child's `{rows.map(...)}` is.
         if (is_map_call(e)) {
             const holder = try gen.arena.create(NodeIR);
-            holder.* = .{ .expression = .{ .value = e } };
+            holder.* = .{
+                .expression = .{
+                    .value = e,
+                },
+            };
             return gen.markup_block(holder);
         }
         switch (e.*) {
@@ -7645,7 +7653,9 @@ test "shared JSX state, keyed rows and actions lower without a local state owner
         \\  </nav>;
         \\}
     }}, "Crumbs");
-    for ([_][]const u8{ "$navigation::open", "level of $navigation::levels", "$level.depth", "$level.title", "click:$navigation::back" }) |expected| {
+    for (
+        [_][]const u8{ "$navigation::open", "level of $navigation::levels", "$level.depth", "$level.title", "click:$navigation::back" },
+    ) |expected| {
         try std.testing.expect(std.mem.indexOf(u8, source, expected) != null);
     }
     try std.testing.expect(std.mem.indexOf(u8, source, "props.levels") == null);

@@ -56,7 +56,9 @@ const Transform = struct {
     }
     fn format(t: *Transform, comptime fmt: S, args: anytype) err.Error!S {
         const renamed = try std.fmt.allocPrint(t.a, fmt, args);
-        inline for (.{ "element(", "append(", "literal(", "insert(", "classes(", "styles(", "reference(", "event(", "attr(", "attribute(", "enhance(" }) |prefix| {
+        inline for (
+            .{ "element(", "append(", "literal(", "insert(", "classes(", "styles(", "reference(", "event(", "attr(", "attribute(", "enhance(" },
+        ) |prefix| {
             if (comptime std.mem.startsWith(u8, fmt, prefix)) return std.fmt.allocPrint(t.a, "{s}.{s}", .{ t.namespace, renamed });
         }
         return renamed;

@@ -866,13 +866,12 @@ fn visitNode(set: *CapabilitySet, node: *const NodeIR) void {
 }
 
 fn capabilitiesOf(allocator: Allocator, root: *const NodeIR, parsed: *const analyze.ParsedModule) Allocator.Error![]const Capability {
-    var set = CapabilitySet.initEmpty();
+    var set = CapabilitySet.empty;
     if (parsed.component.reactive != null) set.insert(.reactivity);
     for (parsed.schema.values()) |field| if (field.type == .action) set.insert(.actions);
     visitNode(&set, root);
     var list: std.ArrayList(Capability) = .empty;
-    inline for (std.meta.fields(Capability)) |field| {
-        const capability: Capability = @enumFromInt(field.value);
+    inline for (comptime std.meta.tags(Capability)) |capability| {
         if (set.contains(capability)) try list.append(allocator, capability);
     }
     // Sorted by kebab-case name (JS default string sort).
@@ -2099,7 +2098,9 @@ test "the compiler core contains no built-in backend names or target switch" {
     // Skip this test's own body when scanning: everything above the marker.
     const marker = "the compiler core contains no built-in backend names";
     const scanned = core[0..std.mem.indexOf(u8, core, marker).?];
-    for ([_][]const u8{ "DomOutput", "ZigOutput", "ReactTarget", "ZigTarget", "@import(\"targets/", "switch (target", "request.target" }) |pattern| {
+    for (
+        [_][]const u8{ "DomOutput", "ZigOutput", "ReactTarget", "ZigTarget", "@import(\"targets/", "switch (target", "request.target" },
+    ) |pattern| {
         try std.testing.expect(util.indexOf(scanned, pattern) == null);
     }
 }
@@ -2108,7 +2109,9 @@ test "the compiler contains no concrete component directives" {
     const files = @embedFile("canonicalize.zig") ++ "\n" ++ @embedFile("compiler.zig");
     const marker = "the compiler contains no concrete component directives";
     const scanned = files[0..std.mem.indexOf(u8, files, marker).?];
-    for ([_][]const u8{ "$$accordion", "$$menu", "$$select", "$$unitControl", "data-p-accordion", "data-p-menu", "data-p-select", "data-p-unit-control" }) |pattern| {
+    for (
+        [_][]const u8{ "$$accordion", "$$menu", "$$select", "$$unitControl", "data-p-accordion", "data-p-menu", "data-p-select", "data-p-unit-control" },
+    ) |pattern| {
         try std.testing.expect(util.indexOf(scanned, pattern) == null);
     }
 }

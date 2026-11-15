@@ -528,7 +528,9 @@ const TypeParser = struct {
             try p.expect("Element");
             return c.make(.node);
         }
-        inline for (.{ "string", "number", "boolean", "undefined", "null", "never", "unknown" }) |name| {
+        inline for (
+            .{ "string", "number", "boolean", "undefined", "null", "never", "unknown" },
+        ) |name| {
             if (token.is(name)) return c.make(@field(Kind, name));
         }
         if (token.is("void")) return c.make(.undefined);

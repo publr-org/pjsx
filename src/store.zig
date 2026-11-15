@@ -507,7 +507,10 @@ pub fn lowerParsedStoreRegistration(allocator: Allocator, parsed_ptr: *const ana
     // Props the browser code reads past the seeded state come in `data-p` as `"$<prop>"`.
     const browser_props = try browserPropReads(a, &reactive, &parsed.component.prop_bindings);
     var prop_fallbacks: StringList = .empty;
-    for (parsed.component.prop_bindings.keys(), parsed.component.prop_bindings.values()) |binding, prop_name| {
+    for (
+        parsed.component.prop_bindings.keys(),
+        parsed.component.prop_bindings.values(),
+    ) |binding, prop_name| {
         if (!util.isIdentifierName(binding) or reactive.hasAction(binding)) continue;
         // A view's `ctx` comes with its props; in the browser it is the page's own.
         if (eql(prop_name, "ctx")) {

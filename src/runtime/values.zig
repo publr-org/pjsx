@@ -391,11 +391,11 @@ pub fn object(arena: std.mem.Allocator, fields: anytype) Error![]const u8 {
 fn write_object(w: *std.Io.Writer, arena: std.mem.Allocator, fields: anytype) !void {
     try w.writeAll("{");
     var separator: []const u8 = "";
-    inline for (@typeInfo(@TypeOf(fields)).@"struct".fields) |field| {
-        const value = @field(fields, field.name);
-        const absent = comptime @typeInfo(field.type) == .optional;
+    inline for (comptime std.meta.fieldNames(@TypeOf(fields))) |name| {
+        const value = @field(fields, name);
+        const absent = comptime @typeInfo(@TypeOf(value)) == .optional;
         if (!absent or value != null) {
-            try write_field(w, arena, separator, field.name, value);
+            try write_field(w, arena, separator, name, value);
             separator = ",";
         }
     }

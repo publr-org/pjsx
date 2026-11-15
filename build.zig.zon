@@ -2,7 +2,7 @@
     .name = .pjsx,
     .version = "0.1.0",
     .fingerprint = 0x55f7e24dabd4a852, // Changing this has security and trust implications.
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         // Build-time only: supplies the `amalgamate` and `docs` steps. Ships
         // nothing into the library itself, so consumers of pjsx never see it.

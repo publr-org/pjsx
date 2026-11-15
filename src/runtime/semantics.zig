@@ -148,7 +148,9 @@ test "scalar envelopes round trip exact numeric bits and reject ambiguous inputs
         const decoded = try scalar_from_json(parsed.value);
         try std.testing.expectEqual(bits, @as(u64, @bitCast(decoded.number)));
     }
-    for ([_][]const u8{ "null", "0", "[]", "[\"number\",0]", "[\"number\",\"+000000000000000\"]", "[\"undefined\",null]", "[\"boolean\",1]", "[\"unknown\"]" }) |source| {
+    for (
+        [_][]const u8{ "null", "0", "[]", "[\"number\",0]", "[\"number\",\"+000000000000000\"]", "[\"undefined\",null]", "[\"boolean\",1]", "[\"unknown\"]" },
+    ) |source| {
         const parsed = try std.json.parseFromSlice(std.json.Value, a, source, .{});
         defer parsed.deinit();
         try std.testing.expectError(error.InvalidPortableScalar, scalar_from_json(parsed.value));
